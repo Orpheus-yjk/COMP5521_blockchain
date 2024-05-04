@@ -1,0 +1,17 @@
+import time, hashlib
+from block import Block
+from transactions import tx_output, tx_input, Transaction
+from blockchain import Blockchain
+a=Blockchain()
+
+
+t=a.mine()
+print(a.chain[-1].header.index)
+print(a.chain[-1].header.difficulty)
+print(a.chain[-1].header.merkle_root)
+
+
+a.print_nodeaddress()
+a.transfer(, ,)
+
+
