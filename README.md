@@ -2,7 +2,7 @@
 
 COMP5521 DISTRIBUTED LEDGER  TECHNOLOGY, CRYPTOCURRENCY AND EPAYMENT Project Specification   
 
-##### Objective:
+### Objective:
 
 Have an in-depth understanding on how the blockchain system works.  
 Be able to write a UTXO (unspent transaction output) blockchain platform. 
@@ -53,7 +53,7 @@ Be able to write a UTXO (unspent transaction output) blockchain platform.
 
 COMP5521分布式账本技术、加密货币和电子支付 期末项目介绍
 
-# 目标： 
+### 目标： 
 
 深入了解区块链系统的工作原理。能够编写一个UTXO（未花费交易输出）区块链平台。
 
