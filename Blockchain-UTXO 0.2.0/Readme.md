@@ -50,59 +50,6 @@ git clone https://github.com/your-repo/yjk-blockchain.git
 cd yjk-blockchain
 pip install -r requirements.txt
 
-```markdown
-# YJK Blockchain - 一个Python实现的区块链系统
-
-![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-
-## 项目概述
-
-YJK Blockchain 是一个教育性质的区块链实现，包含完整的区块链核心组件：
-- 工作量证明(PoW)共识机制
-- P2P网络通信
-- UTXO交易模型
-- 内存池管理
-- 区块链浏览器API
-
-## 核心特性
-
-### 1. 区块链核心
-- **区块结构**：包含版本号、时间戳、Merkle根、难度目标等标准字段
-- **动态难度调整**：每10个区块根据出块速度自动调整
-- **双重SHA256哈希**：符合比特币的哈希安全标准
-- **Merkle树验证**：快速验证交易完整性
-
-### 2. 网络层
-- **P2P通信**：节点发现与区块传播
-- **交易广播**：实时交易传播网络
-- **区块链同步**：增量式区块同步机制
-- **RESTful API**：提供区块链数据查询接口
-
-### 3. 交易系统
-- **UTXO模型**：未花费交易输出记账系统
-- **P2PKH脚本**：标准支付到公钥哈希交易
-- **Coinbase交易**：区块奖励特殊交易
-- **交易签名**：ECDSA数字签名验证
-
-### 4. 内存池
-- **交易验证**：双花检测和签名验证
-- **优先级排序**：按手续费率排序交易
-- **内存管理**：自动淘汰低价值交易
-- **RBF支持**：手续费替换机制
-
-## 快速开始
-
-### 环境要求
-- Python 3.8+
-- 依赖库：`ecdsa`, `base58`, `flask`, `requests`
-
-### 安装步骤
-```bash
-git clone https://github.com/your-repo/yjk-blockchain.git
-cd yjk-blockchain
-pip install -r requirements.txt
-```
 
 ### 启动节点
 ```python
