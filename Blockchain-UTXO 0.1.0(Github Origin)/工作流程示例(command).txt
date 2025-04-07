@@ -1,0 +1,17 @@
+import time, hashlib
+from block import Block
+from transactions import tx_output, tx_input, Transaction
+from blockchain import Blockchain
+
+a=Blockchain()   # 创建新链，自动生成创世块
+t=a.mine()  # 矿工打包交易，获得1000代币奖励
+# 查看最新区块
+print(a.chain[-1].header.index)  # 显示区块高度
+print(a.chain[-1].header.difficulty)  # 当前挖矿难度
+print(a.chain[-1].header.merkle_root)  # 当前默克尔根
+a.print_nodeaddress()  # 当前节点在网络中的地址
+
+# 假设地址A要给地址B转500代币
+a.transfer(地址A, 地址B,500)
+
+
