@@ -1,0 +1,3 @@
+couchdb
+ecdsa==0.13
+kademlia
