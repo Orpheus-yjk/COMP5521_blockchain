@@ -113,20 +113,19 @@ class Mempool:
         total_input = 0
         for vin in tx.vins:
             # 检查UTXO是否存在且未花费
+            is_coinbase = tx.is_coinbase(tx.generate_self_script())
             if self.utxo_monitor.is_spent(vin.txid, vin.referid):
                 logging.warning(f"双花检测: {vin.txid}:{vin.referid}")
                 return False
-            elif vin.txid not in self.utxo_monitor.utxos.keys():
+            elif vin.txid not in self.utxo_monitor.utxos.keys() and not is_coinbase:
                 logging.warning(f"未收到有关交易的任何信息，故无法使用: {vin.txid}:{vin.referid}")
                 return False
-            utxo = self.utxo_monitor.utxos.get(vin.txid, {}).get(vin.referid)
-
-            if tx.is_coinbase(tx.generate_self_script()):
-                total_input += utxo[0]
+            if is_coinbase:
+                total_input += tx.vouts[0].value
                 continue
 
+            utxo = self.utxo_monitor.utxos.get(vin.txid, {}).get(vin.referid)
             # 验证引用是否正确
-            is_coinbase = tx.is_coinbase(tx.generate_self_script())
             if not utxo:
                 logging.warning(f"未引用正确的tx在tx_input中: {vin.txid}:{vin.referid}")
                 return False
@@ -147,6 +146,8 @@ class Mempool:
         if total_output + tx.fee > total_input:
             logging.warning("所需金额（含手续费）超过输入金额")
             return False
+
+        return True
 
     def update_utxo(self, block_transactions: List[Transaction]):
         """区块确认后更新UTXO"""
