@@ -191,10 +191,15 @@ class NetworkInterface:
             return False
 
         # 3. 检查前哈希
-        last_block = self.blockchain.blockchain[-1]
-        if block.header.prev_hash != last_block.block_hash:
-            logging.warning("区块前哈希值不匹配！")
-            return False
+        last_block = None
+        try:
+            last_block = self.blockchain.blockchain[-1]
+        except:
+            pass
+        if last_block:
+            if block.header.prev_hash != last_block.block_hash:
+                logging.warning("区块前哈希值不匹配！")
+                return False
 
         # 4. 检查交易有效性
         for tx in block.txs_data:
@@ -204,7 +209,7 @@ class NetworkInterface:
 
         # 在原有验证基础上增加：检查PoW难度有效性
         target = '0' * block.header.difficulty
-        if not block.block_hash.startswith(target):
+        if not block.header.calculate_blockheader_hash().startswith(target):  # 用区块头的哈希而不是区块哈希
             logging.warning("不满足 PoW 的难度！")
             return False
 
@@ -215,7 +220,6 @@ class NetworkInterface:
             return False
 
         # 在原有验证基础上增加：验证交易Merkle根
-        from mining import MiningModule
         txids = [tx.Txid for tx in block.txs_data]
         if MiningModule._calculate_merkle_root(txids) != block.header.merkle_root:
             logging.warning("默克尔根不匹配！")
@@ -239,7 +243,7 @@ class NetworkInterface:
 
     def _request_blocks(self, start_height: int):
         """从邻居节点请求缺失区块"""
-        for neighbor in self.P2P_neighbor:
+        for neighbor in self.P2P_neighbor:  # FIXME: RuntimeError: dictionary changed size during iteration
             try:
                 response = requests.get(
                     f"http://{neighbor}/blocks/{start_height}",
