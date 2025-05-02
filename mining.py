@@ -68,16 +68,20 @@ class MiningModule:
 
     def mine_block(self, mempool, blockchain, miner_address):
         """工作量证明挖矿"""
-        start_time = time.time()
+
+        # 构造只包含coinbase交易的完整区块
+        coinbase_tx = Transaction.create_coinbase_Tx(
+            blockchain.height()+1,
+            miner_address,
+            self.mining_reward  # 默认值500 * 10 ** 6 ，当前区块奖励
+        )
+        txs = [coinbase_tx] + mempool.get_top_transactions(TRANSACTION_COUNT_LIMIT)  # 选择高优先级交易
+        merkle_root = MiningModule._calculate_merkle_root([tx.Txid for tx in txs])  # 计算默克尔根
+        # 构造区块头
+        block_header = BlockHeader(blockchain.height()+1, time.time(), self.last_block_hash, self.difficulty, merkle_root, 0)
+
         nonce = 0
         target = '0' * self.difficulty
-
-        # 选择高优先级交易
-        txs = mempool.get_top_transactions(TRANSACTION_COUNT_LIMIT)
-        merkle_root = MiningModule._calculate_merkle_root([tx.Txid for tx in txs])
-
-        # 构造区块头
-        block_header = BlockHeader(blockchain.height(), time.time(), self.last_block_hash, self.difficulty, merkle_root, 0)
 
         # 动态难度调整
         self._adjust_difficulty(blockchain)
@@ -90,12 +94,6 @@ class MiningModule:
                 break
             nonce += 1
 
-        # 构造只包含coinbase交易的完整区块
-        coinbase_tx = Transaction.create_coinbase_Tx(
-            block_header.index,
-            miner_address,
-            self.mining_reward  # 默认值500 * 10 ** 6 ，当前区块奖励
-        )
         mined_block = Block(
             index=block_header.index,
             timestamp=block_header.timestamp,
@@ -103,7 +101,7 @@ class MiningModule:
             difficulty=block_header.difficulty,
             merkle_root=block_header.merkle_root,
             nonce=block_header.nonce,
-            txs_data=[coinbase_tx]
+            txs_data=txs
         )
 
         return mined_block
