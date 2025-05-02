@@ -7,7 +7,7 @@ COMP5521 DISTRIBUTED LEDGER  TECHNOLOGY, CRYPTOCURRENCY AND EPAYMENT Project Spe
 Have an in-depth understanding on how the blockchain system works.  
 Be able to write a UTXO (unspent transaction output) blockchain platform. 
 
-# Goals
+### Goals
 
 1. Blockchain Prototype: construct the blockchain system according to the 
    following structure. The block should have the following basic content. 
@@ -49,11 +49,9 @@ Be able to write a UTXO (unspent transaction output) blockchain platform.
 
 
 
-# 项目描述
+### 项目描述
 
-COMP5521分布式账本技术、加密货币和电子支付 期末项目介绍
-
-### 目标： 
+COMP5521分布式账本技术、加密货币和电子支付 期末项目介绍。
 
 深入了解区块链系统的工作原理。能够编写一个UTXO（未花费交易输出）区块链平台。
 
@@ -69,4 +67,193 @@ COMP5521分布式账本技术、加密货币和电子支付 期末项目介绍
 
 钱包：管理所有可以花费的交易。
 
-——您可以参考一些开源项目来实现您的区块链系统，但必须在报告中引用它们。否则可能被视为抄袭。
+## 一、代码中的继承关系分析
+
+### 1. 文件内继承关系
+
+以下是主要的继承关系：
+
+1. **math_util.py**:
+   - `VerifyHashAndSignatureUtils` 继承自 `GenerateKeysUtils` 和 `SignMessageUtils`
+
+2. **transactions.py**:
+   - `Transaction` 类继承自 `CoinbaseScript`, `StandardTransactionScript`, `VerifyHashAndSignatureUtils`
+
+3. **transaction_script.py**:
+   - `CoinbaseScript` 继承自 `TransactionScript`
+   - `StandardTransactionScript` 继承自 `TransactionScript`
+
+### 2. 模块间引用
+
+以下是主要的引用关系：
+
+1. blockchain 引用 transactions
+2. transactions 引用 math_util transaction_script
+3. mempool 引用 transactions math_util
+4. mining 引用 transactions blockchain
+5. network 引用 transaction_script transactions mempool blockchain mining
+
+## 二、`client.py` 实现
+
+```python
+# -*- coding: utf-8 -*-
+"""
+区块链命令行客户端，支持P2P网络通信、挖矿、交易等操作
+运行方式: python client.py [--port P2P_PORT] [--api-port API_PORT] [--peer PEER_IP:PORT]
+"""
+
+import argparse
+import threading
+import time
+from flask import Flask, jsonify
+import requests
+from blockchain import Blockchain
+from mempool import Mempool
+from mining import MiningModule
+from network import NetworkInterface
+
+# 默认配置
+DEFAULT_P2P_PORT = 5000
+DEFAULT_API_PORT = 5001
+
+class BlockchainClient:
+    """区块链命令行客户端"""
+    
+    def __init__(self, p2p_port, api_port):
+        self.blockchain = Blockchain()
+        self.mempool = Mempool()
+        self.miner = MiningModule()
+        self.network = NetworkInterface(self.blockchain, self.mempool)
+        self.p2p_port = p2p_port
+        self.api_port = api_port
+
+        # 启动网络服务
+        threading.Thread(target=self._start_servers).start()
+        time.sleep(1)  # 等待服务启动
+
+    def _start_servers(self):
+        """启动P2P和API服务"""
+        self.network.app.run(port=self.p2p_port)
+        api_app = Flask(__name__)
+        api_app.run(port=self.api_port)
+
+    def add_peer(self, address):
+        """添加邻居节点"""
+        self.network.add_neighbor(address)
+        print(f"已添加邻居节点: {address}")
+
+    def mine_block(self, miner_address):
+        """挖矿"""
+        new_block = self.miner.mine_block(
+            mempool=self.mempool,
+            blockchain=self.blockchain,
+            miner_address=miner_address
+        )
+        if self.network.validate_and_add_block(new_block):
+            self.network.broadcast_block(new_block)
+            print(f"成功挖到区块 #{new_block.header.index}")
+        else:
+            print("挖矿失败，区块验证未通过")
+
+    def print_blockchain(self):
+        """打印区块链信息"""
+        print("\n当前区块链状态:")
+        print(f"区块高度: {self.blockchain.height()}")
+        print(f"最新区块哈希: {self.blockchain.blockchain[-1].block_hash[:16]}...")
+        print(f"邻居节点数: {len(self.network.P2P_neighbor)}\n")
+
+    def sync_blocks(self):
+        """手动触发区块同步"""
+        self.network._sync_blocks()
+
+def main():
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='区块链客户端')
+    parser.add_argument('--port', type=int, default=DEFAULT_P2P_PORT, help='P2P端口')
+    parser.add_argument('--api-port', type=int, default=DEFAULT_API_PORT, help='API端口')
+    parser.add_argument('--peer', help='初始邻居节点地址 (IP:PORT)')
+    args = parser.parse_args()
+
+    # 初始化客户端
+    client = BlockchainClient(args.port, args.api_port)
+    
+    # 添加初始邻居节点
+    if args.peer:
+        client.add_peer(args.peer)
+
+    # 命令行交互
+    while True:
+        cmd = input("\n请输入命令 (mine/addpeer/sync/exit): ").strip().lower()
+        
+        if cmd == 'mine':
+            address = input("请输入矿工地址: ")
+            client.mine_block(address)
+            client.print_blockchain()
+        
+        elif cmd == 'addpeer':
+            peer = input("请输入邻居节点地址 (IP:PORT): ")
+            client.add_peer(peer)
+        
+        elif cmd == 'sync':
+            client.sync_blocks()
+            print("已触发区块同步")
+        
+        elif cmd == 'exit':
+            print("退出系统")
+            break
+        
+        else:
+            print("无效命令，可用命令: mine/addpeer/sync/exit")
+
+if __name__ == "__main__":
+    main()
+```
+
+### 三、使用说明
+
+1. **启动节点**:
+
+   ```bash
+   # 节点1（默认端口）
+   python client.py
+   
+   # 节点2（指定端口并连接节点1）
+   python client.py --port 5002 --api-port 5003 --peer 192.168.1.100:5000
+   ```
+
+2. **主要命令**:
+
+   - `mine`: 开始挖矿，需要输入矿工地址
+   - `addpeer`: 添加邻居节点，格式为`IP:PORT`
+   - `sync`: 手动触发区块同步
+   - `exit`: 退出程序
+
+3. **跨网络通信**:
+
+   - 确保节点在同一局域网
+   - 使用真实内网IP地址而非`localhost`
+   - 防火墙需开放指定端口
+
+### 四、实现的功能
+
+1. **P2P网络通信**:
+   - 自动维护邻居节点列表
+   - 区块/交易广播机制
+   - HTTP接口提供区块链数据
+
+2. **共识机制**:
+   - PoW挖矿算法
+   - 动态难度调整
+   - 区块验证（哈希、Merkle根、交易有效性）
+
+3. **命令行交互**:
+   - 实时查看区块链状态
+   - 手动控制挖矿和同步
+   - 网络节点管理
+
+4. **数据存储**:
+   - 区块链数据序列化存储
+   - UTXO状态内存管理
+   - 交易池维护
+
+此实现满足项目要求中的网络通信、共识机制、数据存储等核心需求，不同节点可通过命令行实现区块链网络的交互操作。
