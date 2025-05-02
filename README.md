@@ -93,7 +93,7 @@ COMP5521分布式账本技术、加密货币和电子支付 期末项目介绍�
 4. mining 引用 transactions blockchain
 5. network 引用 transaction_script transactions mempool blockchain mining
 
-## 二、`client.py` 实现
+## 二、简易`client.py` 实现 —— 不包含转账、节点分类（Miner/Full Node/SPV Node）
 
 ```python
 # -*- coding: utf-8 -*-
