@@ -1,270 +1,331 @@
-"""比特币交易脚本生成与序列化工具库
+# -*- coding: utf-8 -*-
 
-该模块提供以下核心功能：
-1. Coinbase 交易生成（矿工奖励）
-2. 普通交易生成（UTXO 消费）
-3. 交易数据的序列化（script）与 TXID 计算
+"""交易：实现支付到公钥哈希（P2PKH）交易并验证交易。a) 实现支付到公钥哈希（P2PKH）交易。b) 使用非对称加密创建数字签名并验证交易。
 
-主要类：
-- TransactionScript: 基础交易结构构建工具
-- CoinbaseScript: 专用于生成符合规范的 Coinbase 交易
-- StandardTransactionScript: 普通交易生成器
+transactions.py定义了交易相关的类，如tx_input、tx_output和Transaction。
+交易输入引用之前的交易输出，交易输出包含金额和公钥哈希。Transaction类生成交易ID，并处理Coinbase交易（矿工奖励）。
 
-示例用法：
-    >>> # 生成 Coinbase 交易
-    >>> Txid, Tx_data = CoinbaseScript.generate_coinbase_Txid(
-    ...     block_height=840000,
-    ...     miner_address="1A1zP...",
-    ...     mining_reward=625000000
-    ... )
-    >>> # 生成普通交易
-    >>> Txid, Tx_data = StandardTransactionScript.generate_normal_Txid(
-    ...     input_txids=["a1075d..."],
-    ...     input_scripts=["473044..."],
-    ...     output_addresses=["1BvBMSE..."]
-    ... )
-
-注意事项：
-1. 假设所有金额单位均为 satoshi (1 BTC = 100,000,000 satoshi)
-2. 假设Coinbase 交易需等待 100 个区块确认后才能花费
-3. 普通交易的 input_scripts 需包含有效的签名和公钥
-
-参考：
-- Bitcoin Developer Guide: https://developer.bitcoin.org/devguide/transactions.html
-- BIP34: https://github.com/bitcoin/bips/blob/master/bip-0034.mediawiki
 """
+
 __author__ = 'YJK developer'
 __date__ = '2025-04'
 
+import sys
 import hashlib
-import random
-import struct
-from typing import Tuple
+import logging
+from typing import List, Tuple
 
-__all__ = ['TransactionScript', 'CoinbaseScript', 'StandardTransactionScript']
+from math_util import VerifyHashAndSignatureUtils
+from transaction_script import CoinbaseScript, StandardTransactionScript
 
-# Coinbase
-# 拟一个超级节点的公钥来表征发薪人/系统
-SUPERNODE_PRIVKEY = b"9a50346681853432d90e90592938750164ceaec382a8a3473da9e5a1e21d0e5d"  # 无用处，仅供验证
-SUPERNODE_PUBLKEY = b"0265abc03fbdc82e4e3312cba161f92034533fe3c11c5da310021ed3d738c57da4"
-SUPERNODE_ADDRESS = "1HGUt8BThQAjLtmqKAaRF4cHt5ia22HKsp"
-SUPERNODE_DEMO_SIG = b"bd2c37105f141c3bc95911a7e0d40f39f0351dc1f43562c6be014bcaef483e2884af314547c7bb294beac2dbf35cb7768e0ed71b71a7339422330a7cb309c520"
+__all__ = ['txInput', 'txOutput', 'Transaction']
 
-class TransactionScript:
-    """交易序列化辅助工具"""
-    VERSION = 1
+# txInput 填充常量
+INPUT_TXID_PLACEHOLDER = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16'  # 一个符合比特币规范的交易id
+INPUT_REFER_ID_PLACEHOLDER = 0xFFFFFFFF,  # Coinbase 的 refer id 也固定为 0xFFFFFFFF
+INPUT_PUBKEY_PLACEHOLDER = b'03176f9ceaefc86f99e6c9f486525785083eb47ea94870c592bcf475a2303d20f8'
+INPUT_SIGNATURE_PLACEHOLDER = b'1143f5f4f38b526d9202a14dfc1db54cf9270d5762d88d13d704e5bdad4262b10caf7a44d344e8b041bcd753b4e7cbca0fb6d1dc93bcb2440fa376785b8c972f'
+# 交易的签名是由资金的发送方（即输入资金的拥有者）负责的。这是为了证明发送方有权使用该笔资金，并授权将其转移给接收方。
+# 该签名的原始信息是：b"Demo trading data"，通过SignMessageUtils类加密
 
-    @staticmethod
-    def generate_input_script(txid, referid, scriptSig, sequence):
-        """构建输入流script"""
-        return [{
-            "txid": txid,
-            "referid": referid,
-            "scriptSig": scriptSig,
-            "sequence": sequence
-        }]
+# txOutput 填充常量
+OUTPUT_VALUE_PLACEHOLDER = 0
+OUTPUT_PUBKEYHASH_PLACEHOLDER = "17LVrmuCzzibuQUJ265CUdVk6h6inrTJKV"  # 一个符合比特币规范的地址
 
-    @staticmethod
-    def generate_output_script(mining_reward : int, miner_address : str):
-        """构建输出流script"""
-        return [{
-            "value": mining_reward,
-            "script_pubkey_hash": miner_address
-        }]
+# Transaction 填充常量
+TRANSACTION_TXID_PLACEHOLDER = INPUT_TXID_PLACEHOLDER
 
-    @staticmethod
-    def generate_Tx_script(inputs, outputs, nlockTime=0):
-        """构建Transaction Script"""
-        Tx_script = {
-            "version": TransactionScript.VERSION,
-            "locktime": nlockTime,
-            "vins": inputs,
-            "vouts": outputs
-        }
-        return Tx_script
+class txInput:
+    """资金来源凭证：资金的发送方（引用检验之前的交易）
 
-    @staticmethod
-    def serialize_Tx(Tx_data: dict) -> bytes:
-        """简化版的交易序列化"""
+    Attributes:
+        txid(str): 引用的交易ID
+        referid(int): 引用的交易内的索引（tx来源）
+        pubkey(bytes): 签名方（资金的发送方）公钥
+        signature: 签名方（资金的发送方）对交易的签名
 
-        # 版本号 (4字节小端)
-        version = struct.pack("<I", Tx_data["version"])
-        # 输入计数 (1字节)
-        vin_count = bytes([1])
-        # 输入数据
-        txid = bytes.fromhex(Tx_data["vins"][0]["txid"])[::-1]  # 反转字节序
-        referid = struct.pack("<I", Tx_data["vins"][0]["referid"])
-        scriptSig = bytes.fromhex(Tx_data["vins"][0]["scriptSig"])
-        scriptSig_len = bytes([len(scriptSig)])
-        sequence = struct.pack("<I", Tx_data["vins"][0]["sequence"])
-        # 输出计数 (1字节)
-        vout_count = bytes([len(Tx_data["vouts"])])
-        # 输出数据
-        output_data = b""
-        for out in Tx_data["vouts"]:
-            value = struct.pack("<Q", out["value"])
-            script_pubkey_hash = out["script_pubkey_hash"].encode('utf8')  # bytes.fromhex(out["script_pubkey"]) 这是P2PK的。本设计采用P2PKH
-            script_len = bytes([len(script_pubkey_hash)])
-            output_data += value + script_len + script_pubkey_hash
-        # 锁时间 (4字节小端)
-        locktime = struct.pack("<I", Tx_data["locktime"])
+    Methods:
+        serialize(): 序列化
+        deserialize(dict): 反序列化
+    """
 
-        return version + vin_count + txid + referid + scriptSig_len + scriptSig + sequence + vout_count + output_data + locktime
+    def __init__(self, txid: str, referid: int, pubkey: bytes, signature: bytes):
+        self.txid = txid
+        self.referid = referid
+        self.pubkey = pubkey
+        if len(signature)==0:
+            raise ValueError('输入交易签名为空！')  # 简单判断
+        self.signature = signature
 
-class CoinbaseScript(TransactionScript):
-    """用于随机生成符合比特币规范的 Coinbase 交易 TXID"""
-    COINBASE_PUBLKEY = b"0265abc03fbdc82e4e3312cba161f92034533fe3c11c5da310021ed3d738c57da4"
-
-    @staticmethod
-    def generate_coinbase_Txid(block_height: int, miner_address: str, mining_reward: int) -> Tuple[str, dict]:
-        """
-        生成随机的符合规范的 Coinbase 交易 TXID
-        返回: (Txid_hex, Tx_script_dict)
-        """
-        # 1. 构造 Coinbase 输入 (唯一输入，无前序交易)
-        coinbase_script = CoinbaseScript.generate_coinbase_script(block_height)
-
-        # 2. 构造输入，输出（矿工奖励）
-        inputs = TransactionScript.generate_input_script(
-            txid="0000000000000000000000000000000000000000000000000000000000000000",
-            referid=0xFFFFFFFF,  # Coinbase 的 vout 固定为 0xFFFFFFFF
-            scriptSig=coinbase_script.hex(),
-            sequence=0xFFFFFFFF
-        )
-        outputs = TransactionScript.generate_output_script(
-            mining_reward = mining_reward,
-            miner_address = miner_address
-        )
-
-        # 3. 随机生成交易数据（模拟真实结构）
-        Tx_script = TransactionScript.generate_Tx_script(inputs, outputs, block_height+1)  # FIXME：一般第三个参数大于block_height，表示解锁时间
-
-        # 4. 序列化交易数据（简化版，实际需按比特币协议序列化规则）
-        serialized_Tx = TransactionScript.serialize_Tx(Tx_script)
-
-        # 5. 计算 TXID (双重SHA-256)
-        Txid = hashlib.sha256(hashlib.sha256(serialized_Tx).digest()).digest()[::-1].hex()
-
-        return Txid, Tx_script
-
-    # ----------- 辅助函数 -----------
-    @staticmethod
-    def generate_coinbase_script(block_height: int) -> bytes:
-        """生成随机的 Coinbase 脚本（包含区块高度和随机数据）"""
-        # 区块高度按 BIP34 编码
-        height_bytes = bytes([block_height & 0xff])
-        # 随机数据（模拟矿池标签或 ExtraNonce）
-        random_data = bytes([random.randint(0, 255) for _ in range(8)])
-        return height_bytes + random_data
+    def serialize(self):
+        """序列化"""
+        return self.__dict__
 
     @classmethod
-    def is_coinbase(cls, Tx_script):
-        """判断是否为coinbase（挖矿奖励区块）"""
-        print("Script Log: ", Tx_script)
-        if len(Tx_script["vins"])>1 or len(Tx_script["vouts"])>1: return False
-        input = Tx_script["vins"][0]
-        if input["referid"] != 0xFFFFFFFF or input["sequence"] != 0xFFFFFFFF:
-            return False
-        return True
+    def deserialize(cls, data):
+        """反序列化"""
+        txid = data.get('txid', INPUT_TXID_PLACEHOLDER)
+        referid = data.get('referid', INPUT_REFER_ID_PLACEHOLDER)
+        pubkey = data.get('pubkey', INPUT_PUBKEY_PLACEHOLDER)
+        signature = data.get('signature', INPUT_SIGNATURE_PLACEHOLDER)
+        tx_input = cls(txid, referid, pubkey, signature)
+        return tx_input
 
-class StandardTransactionScript(TransactionScript):
-    """普通交易生成器（非Coinbase）"""
+class txOutput:
+    """资金去向记录（包含金额和收款方）
 
-    @staticmethod
-    def generate_normal_Txid(
-        input_txids: list[str],
-        input_referids: list[int],
-        input_scripts: list[str],
-        output_values: list[int],
-        output_addresses: list[str],
-        nlockTime: int = 0
-    ) -> Tuple[str, dict]:
+    Attributes:
+        value: 金额
+        pubkey_hash: 接收方公钥哈希（本设计中为比特币地址）
+
+    Methods:
+        serialize(): 序列化
+        deserialize(dict): 反序列化
+    """
+    def __init__(self, value: int, pubkey_hash: str):
+        self.value = value  # 可代表实际金额 / 虚拟token
+        if len(pubkey_hash)==0:
+            raise ValueError('交易输出的公钥哈希为空！')  # 这里不用通过VerifyHashAndSignatureUtils类判断pubkey_hash是否合规，而是在Transaction中做
+        self.pubkey_hash = pubkey_hash
+
+    def serialize(self):
+        """序列化"""
+        return self.__dict__
+
+    @classmethod
+    def deserialize(cls, data):
+        """反序列化"""
+        value = data.get('value', OUTPUT_VALUE_PLACEHOLDER)
+        pubkey_hash = data.get('pubkey_hash', OUTPUT_PUBKEYHASH_PLACEHOLDER)
+        return cls(value, pubkey_hash)
+
+class Transaction(CoinbaseScript, StandardTransactionScript, VerifyHashAndSignatureUtils):
+    """实现数字货币转账功能。tx是一条资金流， Tx （== txs）是一次完整的P2P交易。
+
+    每次交易收集payer的所有可用Transaction信息，并将其中需要花费的部分汇总并生成一条新的Tx，最后给receiver。
+    使用到的类库：CoinbaseScript, StandardTransactionScript, VerifyHashAndSignatureUtils（含GenerateKeysUtils, SignMessageUtils）。
+
+    Attributes:
+        vins: 交易输入列表。
+            作用：存储该交易的所有输入(资金来源)；每个输入引用之前某个交易的输出(UTXO)
+            特点：普通交易至少有一个输入，Coinbase交易(矿工奖励)有特殊输入(txid为空)
+        vouts: 交易输出列表。
+            作用：存储该交易的所有输出(资金去向)；每个输出指定接收方和转账金额
+            特点：一个交易可以有多个输出(如找零)；输出成为UTXO，直到被后续交易引用
+        Txid： 交易ID。
+            作用：交易的唯一标识符，用于在区块链中引用该交易
+            生成方式：通过generate_Txid()方法生成，挖矿区块id不能用generate_Txid()方法生成而要比如，随机赋值
+            特点：具有唯一性，不可篡改(任何交易内容变化都会改变Txid)，用于构建Merkle树
+        nlockTime：如果未设置（默认为0），交易会立即生效；否则，交易必须等到指定时间或区块高度后才能被打包。
+        sum_value：交易总金额
+            计算方式：累加所有输出(vouts)的value值
+        fee：支付的费率
+        TODO： 完善费率
+
+    Methods:
+        serialize(): 序列化
+        deserialize(dict): 反序列化
+
+        get_memory_size(): 【已弃用】返回对象在内存中的占用大小（单位：字节，近似值）
+        calculate_raw_size(): 返回Transaction的实际大小
+        calculate_fee(int): 根据费率计算手续费
+        update_fee(int): 更新Transaction的fee
+
+        generate_Txid(bool, *arg) -> Tuple[str, dict]: 生成Coinbase和普通Transaction的TXID以及Script
+        generate_self_script() -> dict: 返回自身的script
+
+        create_coinbase_Tx(int, str, int): 创建coinbase交易(矿工奖励)
+        create_normal_tx(List[txInput],List[txOutput], int): 创建普通的单笔交易
+
+        payer_sign(private_key: bytes, receiver_address: str, Tx_data: dict, txid: str, referid: int): 签名函数  TODO：格式检查
+        verify_transaction(locking_script: str, public_key: bytes, signature: bytes, Tx_data:dict): 验证签名
+    """
+    def __init__(self, vins: List[txInput], vouts: List[txOutput], nlockTime=0):  # 默认创建时交易锁定
         """
-        生成普通交易的 TXID 和交易数据
-
-        Args:
-            input_txids: 输入交易的TXID列表（引用UTXO）
-            input_referids: 对应输入的vout索引列表
-            input_scripts: 输入解锁脚本（签名+公钥）的十六进制列表
-            output_addresses: 输出地址列表
-            output_values: 对应输出的金额列表（单位：satoshi）
-            nlockTime: 锁定时间（默认0表示立即生效）
-
-        Returns:
-            Tuple[str, dict]: (TXID_hex, 交易数据字典)
-
-        Raises:
-            ValueError: 如果输入输出数量不匹配或参数非法
+        :param vins: array of class txInput
+        :param vouts: array of class txOutput
+        :param nlockTime
         """
-        # 1. 校验参数
-        if len(input_txids) != len(input_referids) or len(input_txids) != len(input_scripts):
-            raise ValueError("输入参数长度不匹配")
-        if len(output_addresses) != len(output_values):
-            raise ValueError("输出参数长度不匹配")
+        self.vins = vins
+        self.vouts = vouts
+        self.nlockTime = nlockTime  # 如果未设置（默认为0），交易会立即生效；否则，交易必须等到指定时间或区块高度后才能被打包。
+        self.sum_value = 0
+        for vout in vouts:
+            self.sum_value += vout.value
 
-        # 2. 构造输入列表（普通交易需引用已有UTXO）
-        inputs = []
-        for txid, referid, script in zip(input_txids, input_referids, input_scripts):
-            inputs.append({
-                "txid": txid,
-                "referid": referid,
-                "scriptSig": script,  # 包含签名和公钥的解锁脚本
-                "sequence": 0xFFFFFFFF  # 默认最大序列号
-            })
+        self.Txid = self.generate_Txid(False, vins, vouts, nlockTime)  # 默认为普通Transaction，如果Coinbase后续可强制修改
+        # 整个Transaction是没有签名的，只有tx有scriptSig(在交易由payer发出并且进入mempool锁定的时候，用payer的签名)
+        self.fee = 0
 
-        # 3. 构造输出列表（锁定到目标地址）
-        outputs = []
-        for address, value in zip(output_addresses, output_values):
-            outputs.append({
-                "value": value,
-                "script_pubkey_hash": address  # 地址转锁定脚本
-            })
+    def serialize(self):
+        """序列化"""
+        return {
+            'Txid': self.Txid,
+            'nlockTime': self.nlockTime,
+            # 'sum_value': self.sum_value,
+            'serialized_vins': [vin.serialize() for vin in self.vins],  # vin序列化 -> str
+            'serialized_vouts': [vout.serialize() for vout in self.vouts],  # vout序列化 -> str
+            'fee': self.fee
+        }
 
-        # 4. 组装交易数据
-        Tx_data = TransactionScript.generate_Tx_script(
-            inputs=inputs,
-            outputs=outputs,
-            nlockTime=nlockTime
+    @classmethod
+    def deserialize(cls, data):
+        """反序列化"""
+        Txid = data.get('Txid', TRANSACTION_TXID_PLACEHOLDER)
+        nlockTime = data.get('nlockTime', 0)
+        fee = data.get('fee', 0)
+        # sum_value = data.get('sum_value', 0)
+        serialized_vins_data = data.get('serialized_vins', [])
+        serialized_vouts_data = data.get('serialized_vouts', [])
+        vins = []
+        vouts = []
+        for vin_data in serialized_vins_data:
+            vins.append(txInput.deserialize(vin_data))
+        for vout_data in serialized_vouts_data:
+            vouts.append(txOutput.deserialize(vout_data))
+
+        Tx = cls(vins, vouts, nlockTime)
+        return Tx
+
+    def get_memory_size(self):
+        """【弃用】旧方法（不准确），仅作兼容保留
+        返回对象在内存中的占用大小（单位：字节，近似值）"""
+        return sys.getsizeof(self) + sum(
+            sys.getsizeof(inp) for inp in self.vins
+        ) + sum(
+            sys.getsizeof(out) for out in self.vouts
         )
 
-        # 5. 序列化并计算TXID
-        serialized_Tx = TransactionScript.serialize_Tx(Tx_data)
+    def calculate_raw_size(self) -> int:  # 基础内存计算（非 SegWit 交易）
+        """计算交易原始字节大小（单位：字节）"""
+        # 序列化交易数据
+        serialized_tx = StandardTransactionScript.serialize_Tx(self.serialize())
+        return len(serialized_tx)
 
-        Txid = hashlib.sha256(hashlib.sha256(serialized_Tx).digest()).digest()[::-1].hex()
+    def calculate_fee(self, fee_rate: float) -> int:
+        """根据费率计算手续费（单位：satoshi）"""
+        return int(self.calculate_raw_size() * fee_rate)
 
+    def update_fee(self, fee_rate):
+        """更新Transaction的fee"""
+        self.fee = self.calculate_fee(fee_rate=fee_rate)
+
+    @staticmethod
+    def generate_Txid(is_coinbase, *args) -> Tuple[str, dict]:
+        """生成Coinbase和普通Transaction的TXID以及Script"""
+        if is_coinbase:
+            block_height = args[0]
+            miner_address = args[1]
+            mining_reward = args[2]
+            Txid, Tx_data = CoinbaseScript.generate_coinbase_Txid(block_height, miner_address, mining_reward)
+        else:
+            vins = args[0]
+            vouts = args[1]
+            nlockTime = args[2]
+            input_txids = []
+            input_referids = []
+            input_scripts = []
+            output_values = []
+            output_addresses = []
+            for vin, vout in zip(vins, vouts):
+                input_txids.append(vin.txid)
+                input_referids.append(vin.referid)
+
+                # 比特币标准解锁脚本 P2PKH: unlock_script = <sig> <pubKey>
+                this_unlockscript = ' '.join([vin.signature, vin.pubkey.decode('utf8')])
+                input_scripts.append(this_unlockscript)
+
+                output_values.append(vout.value)
+                output_addresses.append(vout.pubkey_hash)
+
+            Txid, Tx_data = StandardTransactionScript.generate_normal_Txid(
+                input_txids, input_referids, input_scripts, output_values, output_addresses, nlockTime
+            )
         return Txid, Tx_data
 
-# ----------- 辅助函数（需与coinbase.py一致） -----------
-# 本设计使用 P2PKH支付，无法 address_to_scriptpubkey
-# 只有 P2PK 才能 address_to_scriptpubkey
-# def address_to_scriptpubkey(address: str) -> str:
-#     """模拟地址转锁定脚本（实际需实现Base58/Bech32解码）"""
-#     return f"76a914{hashlib.sha256(address.encode()).hexdigest()[:40]}88ac"  # P2PKH示例
+    def generate_self_script(self) -> dict:
+        """返回自身数据结构的script"""
+        _, Tx_script = Transaction.generate_Txid(False, self.vins, self.vouts, self.nlockTime)
+        return Tx_script
 
+    @classmethod  # 使用cls在函数中独自创建一个另一个Tranaction类
+    def create_normal_tx(cls, vins: List[txInput], vouts: List[txOutput], nlockTime=0):
+        """创建普通的单笔交易。"""
+        Tx = cls(vins, vouts, nlockTime)
+        Tx.Txid, _ = Transaction.generate_Txid(False, vins, vouts, nlockTime)
+        Tx.update_fee(fee_rate=20)
+        return Tx
 
-# ----------- 示例用法 -----------
-if __name__ == "__main__":  # Standard Transaction Script
-    # 模拟输入（引用已有的UTXO）
-    input_txids = ["ee8ed5f529c9b9c2ad4113de129c3723ace75fa40a6a5c5d70df95d71774d179", "f02bc337bbee55eeeba2c588c76d9f0db4d6fe74364f9b26fa6bd00a6eaa36fc"]  # 实际需替换为真实UTXO的TXID
-    input_referids = [0, 1]                      # UTXO的输出索引
-    input_scripts = [
-        "40c73707d0ff9d71ec",  # 第一个输入的签名脚本（签名+公钥）
-        "407e9be4dd066e5c69"   # 第二个输入的签名脚本
-    ]
+    @classmethod
+    def create_coinbase_Tx(cls, block_height, miner_address, mining_reward):
+        """创建Coinbase交易"""
+        # Coinbase的Txid要进行特殊修改，防止因为不包含随机数导致错误
+        Txid, Tx_script = CoinbaseScript.generate_coinbase_Txid(block_height, miner_address, mining_reward)
+        # 解析
+        # FIXME: 容易出错
+        tx_input = txInput(Txid, Tx_script["vins"][0]["referid"], CoinbaseScript.COINBASE_PUBLKEY, Tx_script["vins"][0]["scriptSig"])  # 签名人：超级节点
+        tx_output = txOutput(mining_reward, Tx_script["vouts"][0]["script_pubkey_hash"])
+        # 搭建
+        Tx = cls([tx_input] , [tx_output], 0)  # FIXME: nlockTime应该设计为当前区块高度+100
+        Tx.Txid = Txid
+        return Tx
 
-    # 模拟输出（1个接收方 + 1个找零）
-    output_addresses = ["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"]
-    output_values = [100000000, 399900000]  # 转账0.1 BTC，找零3.999 BTC（假设输入总额4 BTC）
+    # 签署并验证
+    def get_signature_message(self):
+        """自构造签名材料 - message"""
 
-    # 生成交易
-    Txid, Tx_data = StandardTransactionScript.generate_normal_Txid(
-        input_txids=input_txids,
-        input_referids=input_referids,
-        input_scripts=input_scripts,
-        output_addresses=output_addresses,
-        output_values=output_values,
-        nlockTime=0
-    )
+        Tx_data = StandardTransactionScript.generate_Tx_script(
+            inputs=self.vins,
+            outputs=self.vouts,
+            nlockTime=self.nlockTime
+        )
+        serialized_Tx = StandardTransactionScript.serialize_Tx(Tx_data)
+        Tx_hash = hashlib.sha256(hashlib.sha256(serialized_Tx).digest()).digest()
+        return Tx_hash
 
-    print("生成的普通交易 TXID:", Txid)
-    print("交易数据:", Tx_data)
+    @staticmethod
+    def payer_sign(private_key: bytes, receiver_address: str, Tx_data: dict, txid: str, referid: int) -> Tuple[txInput, txOutput, bytes]:
+        """资金发送者签名得到signature，并且生成资金流返回"""
+        # 处理错误
+        if "version" not in Tx_data.keys() or "locktime" not in Tx_data.keys() or "vins" not in Tx_data.keys() or "vouts" not in Tx_data.keys():
+            raise ValueError("输入的交易数据 Tx_data 格式不对！")
+        elif len(Tx_data)>4:
+            logging.warning("输入的交易数据 Tx_data 包含冗余键值。")
+        vins = Tx_data["vins"]
+        if referid > len(vins)-1 or referid < 0:
+            raise ValueError("引用的资金流索引溢出！")
+        elif txid != vins[referid]["txid"]:
+            raise ValueError("引用的资金流索引与ID不匹配！无法引用")
+
+        # 此处无需验证，直接签名（对整个Transaction签名是合理的，因为在区块链网络上每一笔消费都是可见的）
+        # 1. 序列化交易数据
+        serialized_Tx = StandardTransactionScript.serialize_Tx(Tx_data)
+
+        # 2. 计算交易哈希（双重SHA256）
+        Tx_hash = hashlib.sha256(hashlib.sha256(serialized_Tx).digest()).digest()
+
+        # 3. 生成SignMessageUtils类方法的签名
+        Sig = VerifyHashAndSignatureUtils.sign_transaction(private_key=private_key, message=Tx_hash)
+
+        tx_input = txInput(
+            txid=txid, referid=referid, pubkey=VerifyHashAndSignatureUtils.private_key_to_public_key(private_key), signature=Sig
+        )
+        vouts = Tx_data["vouts"]
+        tx_output = txOutput(
+            value=vouts[referid]["value"], pubkey_hash=receiver_address
+        )
+        return tx_input, tx_output, Sig
+
+    @staticmethod
+    def verify_transaction(locking_script: str, public_key: bytes, signature: bytes, Tx_data:dict):
+        """验证签名"""
+        # 1. 检查公钥哈希
+        unlocking_script = VerifyHashAndSignatureUtils.unlock_p2pkh_script(locking_script, public_key, signature)
+        if unlocking_script == "Unlock Script Fail!": return False
+
+        # 2. 根据Transaction data重新构造message，验证签名
+        serialized_Tx = StandardTransactionScript.serialize_Tx(Tx_data)
+        Tx_hash = hashlib.sha256(hashlib.sha256(serialized_Tx).digest()).digest()
+        if VerifyHashAndSignatureUtils.verify_signature(public_key=public_key, signature=signature, message=Tx_hash):
+            return True
+        else: return False
