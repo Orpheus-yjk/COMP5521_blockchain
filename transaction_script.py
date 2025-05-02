@@ -160,7 +160,7 @@ class CoinbaseScript(TransactionScript):
     @classmethod
     def is_coinbase(cls, Tx_script):
         """判断是否为coinbase（挖矿奖励区块）"""
-        print("Log: ", Tx_script)
+        print("Script Log: ", Tx_script)
         if len(Tx_script["vins"])>1 or len(Tx_script["vouts"])>1: return False
         input = Tx_script["vins"][0]
         if input["referid"] != 0xFFFFFFFF or input["sequence"] != 0xFFFFFFFF:
