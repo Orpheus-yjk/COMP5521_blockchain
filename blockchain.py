@@ -50,9 +50,9 @@ class BlockHeader:
     Methods:
         calculate_blockheader_hash(): 计算当前区块头哈希
     """
-    def __init__(self, index=0, timestamp=0.0, prev_hash="0", difficulty=0, merkle_root=0, nonce=0):
+    def __init__(self, index=0, timestamp=0, prev_hash="0", difficulty=0, merkle_root=0, nonce=0):
         self.index = index
-        self.timestamp = timestamp  # float32类型
+        self.timestamp = timestamp
         self.prev_hash = prev_hash
         self.difficulty = difficulty
         self.nonce = nonce
@@ -136,9 +136,13 @@ class Block():
         )
         txs = [Transaction.deserialize(tx) for tx in data['transactions']]
         return cls(
-            header=header,
-            txs_data=txs,
-            block_hash=data['hash']
+            index=header.index,
+            prev_hash=header.prev_hash,
+            merkle_root=header.merkle_root,
+            timestamp=header.timestamp,
+            difficulty=header.difficulty,
+            nonce=header.nonce,
+            txs_data=txs
         )
 
 class Blockchain:
@@ -148,11 +152,12 @@ class Blockchain:
 
     def height(self):
         """返回区块链高度"""
-        return len(self.blockchain)-1
+        return len(self.blockchain)
 
     def add_block(self, block):
         """添加区块"""
         self.blockchain.append(block)
+
 
     def reload_blockchain(self, one_blockchain) -> bool:
         """因为区块链共识的原因需要重载blockchain。区块验证在network中做"""
