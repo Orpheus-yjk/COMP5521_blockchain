@@ -98,25 +98,41 @@ class NetworkInterface:
     def _setup_api(self):
         """初始化API端点"""
 
+        # network.py 的 receive_block 端点中
         @self.app.route('/block', methods=['POST'])
         def receive_block():
-            """区块接收端点"""
+            # 获取发送方IP（简化实现，实际需从请求头获取）
+            sender_ip = request.remote_addr
+            sender_address = f"{sender_ip}:{P2P_PORT}"  # 假设对方P2P端口固定为5000
+
             block_data = request.get_json()
             block = Block.deserialize(block_data)
-            print("\nReceived block data:", json.dumps(block_data, indent=2))
+
+            # 更新发送方的高度
+            if sender_address in self.P2P_neighbor:
+                self.P2P_neighbor[sender_address]['height'] = block.header.index
+                self.P2P_neighbor[sender_address]['last_seen'] = datetime.now()
+
             if self.validate_and_add_block(block):
                 return jsonify({"message": "Block accepted"}), 200
             return jsonify({"error": "Invalid block"}), 400
 
         @self.app.route('/blocks/<int:index>', methods=['GET'])
         def get_block(index):
-            if index < len(self.blockchain.blockchain):
-                return jsonify(self.blockchain.blockchain[index].serialize()), 200
+            if index <= len(self.blockchain.blockchain) and index > 0:
+                return jsonify(self.blockchain.blockchain[index-1].serialize()), 200
             return jsonify({"error": "Block not found"}), 404
 
         @self.app.route('/blocks/latest', methods=['GET'])
         def latest_block():
-            return jsonify(self.blockchain.blockchain[-1].serialize()), 200
+            print("\033[96m>>>\033[0m")
+            print(self.blockchain)
+            print(self.blockchain.blockchain)
+            print("\033[96m>>>\033[0m")
+            try:
+                return jsonify(self.blockchain.blockchain[-1].serialize()), 200
+            except:
+                return jsonify({"error": "Previous block not found"}), 404
 
         @self.app.route('/transactions', methods=['POST'])
         def new_transaction():
@@ -155,10 +171,21 @@ class NetworkInterface:
     def add_neighbor(self, address: str):
         """添加P2P邻居节点"""
         if address not in self.P2P_neighbor:
+            try:
+                # 主动获取邻居最新高度
+                response = requests.get(f"http://{address}/blocks/latest", timeout=3)
+                if response.status_code == 200:
+                    latest_block = response.json()
+                    height = latest_block['header']['index']
+                else:
+                    height = 0
+            except:
+                height = 0
+
             self.P2P_neighbor[address] = {
                 'last_seen': datetime.now(),
                 'status': 'connected',
-                'height': 0
+                'height': height  # 初始化为实际高度
             }
             logging.info(f"Added new peer: {address}")
 
@@ -183,7 +210,7 @@ class NetworkInterface:
                 logging.info(f"Block {block.header.index} broadcasted to {neighbor}")
             except requests.exceptions.RequestException as e:
                 logging.error(f"Failed to broadcast to {neighbor}: {str(e)}")
-                self.remove_neighbor(neighbor)
+                # self.remove_neighbor(neighbor)
 
     def broadcast_tx(self, tx: Transaction):
         """广播交易到P2P网络"""
@@ -197,11 +224,12 @@ class NetworkInterface:
                 )
                 logging.debug(f"Transaction {tx.Txid[:8]} broadcasted")
             except requests.exceptions.RequestException:
-                self.remove_neighbor(neighbor)
+                pass
+                # self.remove_neighbor(neighbor)
 
     def validate_and_add_block(self, block: Block) -> bool:
         # print(">>>")
-        # logging.warning(f"块所在的高度以及本地区块链高度: {block.header.index} vs {self.blockchain.height()}")
+        # logging.warning(f">>> 块所在的高度以及本地区块链高度: {block.header.index} vs {self.blockchain.height()} .")
         # print(">>>")
         """完整区块验证流程"""
         # 1. 基础验证
@@ -267,26 +295,33 @@ class NetworkInterface:
         """单次同步区块（非循环）"""
         try:
             max_height = max([meta['height'] for meta in self.P2P_neighbor.values()])
+            print(f"\033[96mSYNC——  {max_height} vs {self.blockchain.height()}\033[0m")
             if max_height > self.blockchain.height():
                 self._request_blocks(self.blockchain.height() + 1)
         except ValueError:
             pass
 
     def _request_blocks(self, start_height: int):
-        """从邻居节点请求缺失区块"""
-        for neighbor in self.P2P_neighbor:  # FIXME: RuntimeError: dictionary changed size during iteration
+        """从其他区块链获取区块"""
+        for neighbor in list(self.P2P_neighbor.keys()):
+            print(">>>")
+            print(neighbor)
+            print(">>>")
             try:
-                response = requests.get(
-                    f"http://{neighbor}/blocks/{start_height}",
-                    timeout=5
-                )
+                response = requests.get(f"http://{neighbor}/blocks/{start_height}", timeout=5)
                 if response.status_code == 200:
                     block_data = response.json()
+                    print(">>> Sync Block Info:")
+                    print(block_data)
                     block = Block.deserialize(block_data)
                     if self.validate_and_add_block(block):
-                        logging.info(f"Synced block {block.header.index}")
-            except requests.exceptions.RequestException:
-                self.remove_neighbor(neighbor)
+                        logging.info(f"成功同步区块 {block.header.index}")
+                        # 更新邻居高度
+                        # self.P2P_neighbor[neighbor]['height'] = block.header.index
+                        return
+            except Exception as e:
+                logging.error(f"从节点 {neighbor} 同步失败: {str(e)}")
+                # self.remove_neighbor(neighbor)
 
 
 if __name__ == "__main__":
