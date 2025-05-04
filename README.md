@@ -214,16 +214,21 @@ if __name__ == "__main__":
 1. **启动节点**:
 
    ```bash
-   # 节点1（默认端口）
+   # 默认端口
    python client.py
    
-   # 节点2（指定端口并连接节点1）
-   python client.py --port 5002 --api-port 5003 --peer 192.168.1.100:5000
+   # 节点1（指定端口号和邻居）
+   python client.py --port 5000 --api-port 5001 --peer 127.0.0.1:6000
+   
+   # 节点2（指定端口号和邻居）
+   python client.py --port 6000 --api-port 6001 --peer 127.0.0.1:5000
+
+   # 节点3（其他）
    ```
 
 2. **主要命令**:
 
-   - `mine`: 开始挖矿，需要输入矿工地址
+   - `mine`: 开始挖矿，需要输入矿工地址（参考地址：`1HGUt8BThQAjLtmqKAaRF4cHt5ia22HKsp` `17LVrmuCzzibuQUJ265CUdVk6h6inrTJKV` `1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa` `1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2`）
    - `addpeer`: 添加邻居节点，格式为`IP:PORT`
    - `sync`: 手动触发区块同步
    - `exit`: 退出程序
@@ -256,4 +261,4 @@ if __name__ == "__main__":
    - UTXO状态内存管理
    - 交易池维护
 
-此实现满足项目要求中的网络通信、共识机制、数据存储等核心需求，不同节点可通过命令行实现区块链网络的交互操作。
+此实现满足项目要求中的网络通信、共识机制、数据存储等核心需求，不同节点可通过命令行实现区块链网络的交互操作，节点之间定期同步区块链数据。
