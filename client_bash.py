@@ -7,8 +7,7 @@
 import argparse
 import threading
 import time
-from flask import Flask, jsonify
-import requests
+from flask import Flask
 from blockchain import Blockchain
 from mempool import Mempool
 from mining import MiningModule
@@ -20,7 +19,7 @@ DEFAULT_API_PORT = 5001
 
 class BlockchainClient:
     """区块链命令行客户端"""
-    
+
     def __init__(self, p2p_port, api_port):
         self.blockchain = Blockchain()
         self.mempool = Mempool()
@@ -72,9 +71,20 @@ class BlockchainClient:
             pass
         print(f"邻居节点数: {len(self.network.P2P_neighbor)}\n")
 
-    def sync_blocks(self):
+    def sync_per_block(self):
         """手动触发区块同步"""
-        self.network.sync_blocks_once()
+        max_retry = 3  # 失败最多3次
+        while True:
+            result = self.network.sync_one_blocks()
+            if result == "sync once success": continue
+            elif result == "sync already finished": break
+            elif result == "sync failed for some reason":
+                max_retry -= 1
+                if max_retry == 0: break
+                time.sleep(1)
+
+    def sync_blocks(self):
+        self.network._sync_blocks()
 
 def main():
     # 解析命令行参数
@@ -86,32 +96,33 @@ def main():
 
     # 初始化客户端
     client = BlockchainClient(args.port, args.api_port)
-    
+
     # 添加初始邻居节点
     if args.peer:
         client.add_peer(args.peer)
 
     # 命令行交互
     while True:
-        cmd = input("\n请输入命令 (mine/addpeer/sync/exit): ").strip().lower()
-        
+        cmd = input("\n请输入命令 (mine/addpeer/sync/exit) >>>\n").strip().lower()
+
         if cmd == 'mine':
-            address = input("请输入矿工地址: ")
+            address = input("请输入矿工地址 >>>\n")
             client.mine_block(address)
             client.print_blockchain()
-        
+
         elif cmd == 'addpeer':
-            peer = input("请输入邻居节点地址 (IP:PORT): ")
+            peer = input("请输入邻居节点地址 (IP:PORT) >>>\n")
             client.add_peer(peer)
-        
+
         elif cmd == 'sync':
-            client.sync_blocks()
             print("已触发区块同步")
-        
+            client.sync_blocks()
+            client.print_blockchain()
+
         elif cmd == 'exit':
             print("退出系统")
             break
-        
+
         else:
             print("无效命令，可用命令: mine/addpeer/sync/exit")
 
