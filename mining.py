@@ -75,10 +75,10 @@ class MiningModule:
             miner_address,
             self.mining_reward  # 默认值500 * 10 ** 6 ，当前区块奖励
         )
-        txs = [coinbase_tx] + mempool.get_top_transactions(TRANSACTION_COUNT_LIMIT)  # 选择高优先级交易
+        txs = [coinbase_tx] + mempool.get_top_transactions(TRANSACTION_COUNT_LIMIT-1)  # 选择高优先级交易
         merkle_root = MiningModule._calculate_merkle_root([tx.Txid for tx in txs])  # 计算默克尔根
         # 构造区块头
-        print(">>> ", "DIFFICULTY: ",self.difficulty, " <<<")
+        print(">>> ", "当前挖矿难度: ", self.difficulty)
         block_header = BlockHeader(blockchain.height()+1, time.time(), self.last_block_hash, self.difficulty, merkle_root, 0)
 
         nonce = 0
@@ -87,6 +87,7 @@ class MiningModule:
         # 动态难度调整
         self._adjust_difficulty(blockchain)
 
+        _mining_start_time = time.time()
         # 寻找有效nonce
         while True:
             block_header.nonce = nonce
@@ -94,6 +95,7 @@ class MiningModule:
             if block_hash.startswith(target):
                 break
             nonce += 1
+        print(">>> ", f"挖矿所用时间: {time.time() - _mining_start_time : .1f}", "sec")
 
         mined_block = Block(
             index=block_header.index,
