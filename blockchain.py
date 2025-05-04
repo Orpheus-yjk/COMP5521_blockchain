@@ -145,7 +145,27 @@ class Block():
         )
 
 class Blockchain:
-    """区块链数据结构"""
+    """区块链数据结构
+
+    处理分叉场景的流程
+        1.发现分叉
+        节点A发现节点B的链高度更高或累计难度更大时，请求完整链数据。
+
+        2.验证新链
+        检查每个区块的连续性（prev_hash匹配）
+        验证所有区块的PoW和交易有效性
+        计算整条链的累计难度
+
+        3.链切换决策
+        最长链原则：选择高度更高的链
+        最大难度原则：如果高度相同，选择累计难度更大的链
+        回滚本地链：如果接受新链，需：
+            清空当前未确认交易池（mempool）
+            重新计算UTXO集
+
+        4.广播新链
+            节点A切换成功后，向邻居广播自己的新链状态。
+    """
     def __init__(self):
         self.blockchain = []
 
@@ -153,14 +173,18 @@ class Blockchain:
         """返回区块链高度"""
         return len(self.blockchain)
 
+    def calculate_chain_difficulty(self) -> float:
+        """计算链的总难度（用于最长链原则）"""
+        return sum(block.header.difficulty for block in self.blockchain)
+
     def add_block(self, block):
         """添加区块"""
         self.blockchain.append(block)
 
-    def reload_blockchain(self, one_blockchain) -> bool:
+    def reload_blockchain(self, one_Blockchain) -> bool:
         """因为区块链共识的原因需要重载blockchain。区块验证在network中做"""
-        if self.validate_blockchain(one_blockchain):
-            self.blockchain = copy.deepcopy(one_blockchain)
+        if self.validate_blockchain(one_Blockchain):
+            self.blockchain = copy.deepcopy(one_Blockchain.blockchain)
             return True
         else: return False
 
@@ -185,7 +209,7 @@ class Blockchain:
         创世区块前哈希必须为"0"
 
         高度一致性验证
-        确保区块链长度与高度值一致（高度=长度-1）。
+        确保区块链长度与高度值一致（高度=长度）。
         """
         previous_block = None
         for block in one_blockchain.blockchain:
@@ -196,7 +220,7 @@ class Blockchain:
 
             # 2. 验证工作量证明（难度目标）
             target = '0' * block.header.difficulty
-            current_hash = block.block_hash
+            current_hash = block.header.calculate_blockheader_hash()
             if not current_hash.startswith(target):
                 logging.error(f"区块 {block.header.index} PoW验证失败，难度不匹配")
                 return False
@@ -219,19 +243,31 @@ class Blockchain:
                     return False
             else:
                 # 创世区块特殊检查
-                if block.header.prev_hash != "0":
+                if not all(c == '0' for c in block.header.prev_hash):
                     logging.error("创世区块前哈希不为0")
                     return False
 
             previous_block = block
 
         # 5. 区块链高度一致性验证
-        if len(one_blockchain.blockchain) != one_blockchain.height() + 1:
+        if len(one_blockchain.blockchain) != one_blockchain.height():
             logging.error("区块链高度与区块数量不一致")
             return False
 
         return True
 
+    def serialize(self):
+        """序列化整个区块链"""
+        return {
+            'blockchain': [block.serialize() for block in self.blockchain]
+        }
+
+    @classmethod
+    def deserialize(cls, data):
+        """反序列化区块链"""
+        chain = cls()
+        chain.blockchain = [Block.deserialize(block_data) for block_data in data['blockchain']]
+        return chain
 
 if __name__ == "__main__":
     pass
