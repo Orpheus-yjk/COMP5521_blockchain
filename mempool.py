@@ -134,7 +134,7 @@ class Mempool:
             # locking_script = f"OP_DUP OP_HASH160 {utxo[1]} OP_EQUALVERIFY OP_CHECKSIG"
             if not VerifyHashAndSignatureUtils.verify_signature(
                     public_key=vin.pubkey,
-                    signature=vin.signature,
+                    signature=bytes.fromhex(vin.signature),
                     message=tx.get_signature_message()
             ):
                 logging.warning("签名验证失败")
@@ -163,7 +163,7 @@ class Mempool:
     def get_top_transactions(self, n: int) -> List[Transaction]:
         """获取手续费最高的前n笔交易（矿工调用）"""
         if n>len(self.transactions):
-            logging.warning("调取超过UTXO栈高数量的交易，已自动截断。")
+            logging.warning("调取超过UTXO栈高数量的交易进行区块打包。已自动截断。")
             n = len(self.transactions)
         return sorted(
             self.transactions.values(),
@@ -202,6 +202,15 @@ class Mempool:
             tx = self.transactions[txid]
             self.current_size -= len(tx.data) if tx.data else 100
             del self.transactions[txid]
+
+    def on_blockchain_replaced(self, new_blockchain):
+        """当区块链被替换时，重置UTXO和交易池"""
+        self.utxo_monitor = UTXOManager()  # 重置UTXO
+        self.transactions.clear()  # 清空交易池
+
+        # 重新构建UTXO集（从新链的所有区块中）
+        for block in new_blockchain.blockchain:
+            self.update_utxo(block.txs_data)
 
     def reload_mempool_from_DB(self):
         """从数据库恢复类的所有数据"""
