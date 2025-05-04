@@ -92,12 +92,14 @@ class NetworkInterface:
         app (Flask): P2P服务端应用实例
     """
 
-    def __init__(self, blockchain: Blockchain, mempool: Mempool):
+    def __init__(self, blockchain: Blockchain, mempool: Mempool, p2p_port, api_port):
         """初始化网络接口
         Args:
             blockchain: 已初始化的区块链实例
             mempool: 交易池实例
         """
+        self.p2p_port = p2p_port
+        self.api_port = api_port
         self.P2P_neighbor: Dict[str, Dict] = {}  # {address: {last_seen, status, height}}
         self.blockchain = blockchain
         self.mempool = mempool
@@ -120,7 +122,8 @@ class NetworkInterface:
         def receive_block():
             # 获取发送方IP（简化实现，实际需从请求头获取）
             sender_ip = request.remote_addr
-            sender_address = f"{sender_ip}:{P2P_PORT}"  # 假设对方P2P端口固定为5000
+            sender_port = request.headers.get('X-P2P-Port', str(P2P_PORT))  # 默认回退到默认端口
+            sender_address = f"{sender_ip}:{sender_port}"  # 假设对方P2P端口固定为5000
 
             block_data = request.get_json()
             block = Block.deserialize(block_data)
@@ -175,8 +178,20 @@ class NetworkInterface:
         @self.app.route('/blocks/total_difficulty', methods=['GET'])
         def get_total_difficulty():
             """返回区块链累计难度"""
-            total = sum(block.header.difficulty for block in self.blockchain.blockchain)
-            return jsonify({"total_difficulty": total}), 200
+            try:
+                total = sum(block.header.difficulty for block in self.blockchain.blockchain)
+                return jsonify({"total_difficulty": total}), 200
+            except:
+                return jsonify({"error": "Get total difficulty failed"}), 404
+
+        @self.app.route('/blocks/height', methods=['GET'])
+        def get_height():
+            """返回区块链高度"""
+            try:
+                _height = self.blockchain.height()
+                return jsonify({"height": _height}), 200
+            except:
+                return jsonify({"error": "Get height failed"}), 404
 
     def start_network(self):
         """启动网络服务线程
@@ -283,7 +298,8 @@ class NetworkInterface:
         for neighbor in valid_neighbors:
             try:
                 # 先发送区块
-                requests.post(f"http://{neighbor}/block", json=block.serialize(), timeout=5)
+                headers = {'X-P2P-Port': str(self.p2p_port)}
+                requests.post(f"http://{neighbor}/block", json=block.serialize(), headers=headers, timeout=5)
                 # 再主动查询对方最新高度
                 response = requests.get(f"http://{neighbor}/blocks/latest", timeout=2)
                 if response.status_code == 200:
@@ -427,12 +443,21 @@ class NetworkInterface:
         try:
             # 获取所有邻居节点的高度和累计难度
             peers_info = []
+            for addr in self.P2P_neighbor.keys():  # 刷新neighbor的区块链高度 O(n)
+                try:
+                    response = requests.get(f"http://{addr}/blocks/height", timeout=10)
+                    if response.status_code == 200:
+                        _height = int(response.json()['height'])
+                        self.P2P_neighbor[addr]['height'] = _height
+                except:
+                    continue
+
             for addr, meta in self.P2P_neighbor.items():
                 try:
                     # 新增：请求邻居的累计难度（需在API中添加对应端点）
                     response = requests.get(f"http://{addr}/blocks/total_difficulty", timeout=3)
                     if response.status_code == 200:
-                        total_difficulty = float(response.json()['total_difficulty'])
+                        total_difficulty = int(response.json()['total_difficulty'])
                         peers_info.append((addr, meta['height'], total_difficulty))
                 except:
                     continue
@@ -443,6 +468,7 @@ class NetworkInterface:
             # 按累计难度排序（优先选择难度最大的链）
             peers_info.sort(key=lambda x: -x[2])  # 降序排列
             best_peer = peers_info[0]
+            print(">>> 最高区块链的高度、总难度:",best_peer)
             # 如果对方链更长或难度更高，请求同步
             if best_peer[1] > self.blockchain.height() or \
                     (best_peer[1] == self.blockchain.height() and best_peer[2] > self._calculate_local_difficulty()):
@@ -455,7 +481,6 @@ class NetworkInterface:
 
     def _request_full_chain(self, peer_address: str):
         """从指定节点请求完整区块链并验证"""
-        response = requests.get(f"http://{peer_address}/blocks/full", timeout=10)
         try:
             response = requests.get(f"http://{peer_address}/blocks/full", timeout=10)
             if response.status_code == 200:
@@ -503,7 +528,7 @@ if __name__ == "__main__":
     print("NETWORK.PY start")
     blockchain = Blockchain()
     mempool = Mempool()
-    network = NetworkInterface(blockchain, mempool)
+    network = NetworkInterface(blockchain, mempool, 5000, 5001)
     miner = MiningModule()
 
     # 启动网络服务
