@@ -23,8 +23,19 @@ DEFAULT_API_PORT = 5001
 class BlockchainClient:
     def __init__(self, p2p_port, api_port):
         try:
+
             # 初始化区块链数据库
             self.blockchain = Blockchain(p2p_port)
+
+            # 询问是否从LevelDB加载数据
+            load_from_db = input("是否从LevelDB加载区块链数据？(y/n): ").strip().lower() == 'y'
+
+            if not load_from_db:
+                print("清空LevelDB数据库...")
+                self._clear_leveldb()
+
+                # 初始化内存池和UTXO数据库
+            self.mempool = Mempool(p2p_port=p2p_port)
 
             # 初始化内存池和UTXO数据库
             self.mempool = Mempool(p2p_port = p2p_port)
@@ -46,6 +57,11 @@ class BlockchainClient:
             self.p2p_port = p2p_port
             self.api_port = api_port
 
+            self._reset_mongodb()  # 清空并重建MongoDB UTXO数据
+
+            # 清理无效的Redis邻居节点
+            self._clean_redis_neighbors()
+
             # 启动网络服务
             threading.Thread(target=self._start_servers).start()
             time.sleep(1)  # 等待服务启动
@@ -53,6 +69,49 @@ class BlockchainClient:
         except Exception as e:
             self._cleanup_resources()
             raise RuntimeError(f"初始化失败: {str(e)}")
+
+    def _clear_leveldb(self):
+        """清空LevelDB数据库"""
+        if self.blockchain.is_db_connected():
+            try:
+                # 遍历删除所有区块
+                for key, _ in self.blockchain.db._db:
+                    self.blockchain.db._db.delete(key)
+                logging.info("已清空LevelDB数据")
+            except Exception as e:
+                logging.error(f"清空LevelDB失败: {str(e)}")
+                raise
+
+    def _reset_mongodb(self):
+        """清空并重建MongoDB UTXO数据"""
+        if hasattr(self.mempool.utxo_monitor, 'db'):
+            try:
+                # 清空现有UTXO数据
+                self.mempool.utxo_monitor.db.utxo_collection.delete_many({})
+
+                # 从本地区块链重建UTXO
+                for block in self.blockchain.blockchain:
+                    self.mempool.update_utxo(block.txs_data)
+                logging.info("已重建MongoDB UTXO数据")
+            except Exception as e:
+                logging.error(f"重置MongoDB失败: {str(e)}")
+                raise
+
+    def _clean_redis_neighbors(self):
+        """清理无效的Redis邻居节点"""
+        if hasattr(self.network, 'redis'):
+            try:
+                neighbors = self.network.redis.get_hash("neighbors")
+                for addr, meta_str in list(neighbors.items()):
+                    try:
+                        meta = json.loads(meta_str)
+                        if meta.get('status') == 'disconnected':
+                            self.network.redis.client.hdel("neighbors", addr)
+                    except (json.JSONDecodeError, ValueError):
+                        self.network.redis.client.hdel("neighbors", addr)
+                logging.info("已清理无效Redis邻居节点")
+            except Exception as e:
+                logging.error(f"清理Redis邻居节点失败: {str(e)}")
 
     def _verify_db_connections(self):
         """验证所有数据库连接"""
@@ -161,8 +220,10 @@ class BlockchainClient:
                 print("LevelDB中没有区块数据")
                 return
 
+            _index = 0
             for block_hash, block_data in all_blocks.items():
-                print(f"\033[96m>>> Block Hash: {block_hash[:16]}...\033[0m")
+                _index += 1
+                print(f"\033[96m>>> Block: {_index} Block Hash: {block_hash[:16]}...\033[0m")
                 print(block_data)
         except Exception as e:
             # 输出红色文本
