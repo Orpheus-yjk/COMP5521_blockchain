@@ -19,25 +19,42 @@
 __author__ = 'YJK developer'
 __date__ = '2025-04'
 
-from typing import List
 import time
+import json
 import logging
+from typing import List
 
 from transactions import Transaction
 from math_util import VerifyHashAndSignatureUtils
+from blockchain import Block
+from db_module import MongoDBModule
+from db_module import RedisModule
 
 
 class UTXOManager:
     """UTXO状态跟踪器"""
-    def __init__(self):
+    def __init__(self, p2p_port):
         self.utxos = {}  # {txid: {vout_index: (amount, address)}}
         self.spent_outputs = set()  # {(txid, vout_index)}
+        self.db = MongoDBModule(db_name="utxo_db_port_"+str(p2p_port))
+        self._load_utxos()  # 使用MongoDB存储UTXO
+
+    def _load_utxos(self):
+        """从MongoDB加载UTXO"""
+        utxos = self.db.get_utxos_by_address("*")  # 获取所有UTXO
+        for utxo in utxos:
+            if utxo['txid'] not in self.utxos:
+                self.utxos[utxo['txid']] = {}
+            self.utxos[utxo['txid']][utxo['vout_index']] = (
+                utxo['amount'], utxo['address'])
 
     def add_utxo(self, txid: str, vout_index: int, amount: int, address: str):
         """添加UTXO"""
         if txid not in self.utxos:
             self.utxos[txid] = {}
         self.utxos[txid][vout_index] = (amount, address)
+        # 保存到MongoDB
+        self.db.add_utxo(txid, vout_index, amount, address, "")
 
     # 因为区块链是不允许修改的，所以不能这么写。UTXO实际上不会删除使用过的交易；而是通过标记输入为已花费
     # def del_utxo(self, txid: str, vout_index: int):
@@ -48,6 +65,8 @@ class UTXOManager:
     def mark_spent(self, txid: str, vout_index: int):
         """标记使用过的UTXO"""
         self.spent_outputs.add((txid, vout_index))
+        # 更新MongoDB
+        self.db.mark_as_spent(txid, vout_index)
 
     def is_spent(self, txid: str, vout_index: int) -> bool:
         """判断是否使用过"""
@@ -76,19 +95,40 @@ class Mempool:
     Mempool类具有对外来Transaction的独立基础验证能力。
     """
 
-    def __init__(self, max_size_mb: int = 10, network=None):
+    def __init__(self, max_size_mb: int = 10, p2p_port = 5000):
         """
         Args:
             max_size_mb: 最大内存（默认10MB）
-            network: 网络接口
+            p2p_port: 网络接口
         """
         self.transactions = {}  # {txid: Transaction} ； self.transactions: Dict[str, Transaction]。优化UTXO交易查询放在程序运行堆栈当中
-        self.utxo_monitor = UTXOManager()  # UTXO状态跟踪
+        self.redis = RedisModule(db_name="mempool_db_port_"+str(p2p_port))
+        self._load_transactions()
+        self.utxo_monitor = UTXOManager(p2p_port)  # UTXO状态跟踪
+        self.p2p_port = p2p_port
         self.max_size = max_size_mb * 1024 * 1024
         self.current_size = 0  # 当前内存占用
-        self.network = network  # 网络接口
         self.last_block_time = time.time()
         self.difficulty = 4  # 初始难度（前导零个数）
+
+    def _load_transactions(self, max_retries=3):
+        """从Redis加载交易，带重试机制"""
+        for attempt in range(max_retries):
+            try:
+                tx_list = self.redis.get_list("transactions")
+                for tx_data in tx_list:
+                    tx = Transaction.deserialize(json.loads(tx_data))
+                    self.transactions[tx.Txid] = tx
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(1)
+
+    def _save_transactions(self):
+        """保存交易到Redis"""
+        tx_list = [json.dumps(tx.serialize()) for tx in self.transactions.values()]
+        self.redis.push_list("transactions", *tx_list)
 
     def add_transaction(self, tx: Transaction) -> bool:
         """添加交易到 Mempool，返回是否成功"""
@@ -106,6 +146,18 @@ class Mempool:
         while self.current_size + tx_size > self.max_size:
             if not self._evict_low_fee_tx():
                 return False
+
+        self.transactions[tx.Txid] = tx
+        self._save_transactions()
+        return True
+
+    def remove_transaction(self, txid: str):
+        """移除交易（例如被打包进区块后）"""
+        if txid in self.transactions:
+            tx = self.transactions[txid]
+            self.current_size -= len(tx.data) if tx.data else 100
+            del self.transactions[txid]
+            self._save_transactions()
 
     def _validate_transaction(self, tx: Transaction) -> bool:
         """完整交易验证流程"""
@@ -196,20 +248,22 @@ class Mempool:
         self.add_transaction(new_Tx)
         return True
 
-    def remove_transaction(self, txid: str):
-        """移除交易（例如被打包进区块后）"""
-        if txid in self.transactions:
-            tx = self.transactions[txid]
-            self.current_size -= len(tx.data) if tx.data else 100
-            del self.transactions[txid]
-
     def on_blockchain_replaced(self, new_blockchain):
         """当区块链被替换时，重置UTXO和交易池"""
-        self.utxo_monitor = UTXOManager()  # 重置UTXO
+        self.utxo_monitor = UTXOManager(self.p2p_port)  # 重置UTXO
         self.transactions.clear()  # 清空交易池
 
         # 重新构建UTXO集（从新链的所有区块中）
         for block in new_blockchain.blockchain:
+            self.update_utxo(block.txs_data)
+
+    def rebuild_utxo_from_blockchain(self, all_blocks):
+        """从区块链重建UTXO"""
+        # 清空现有数据
+        self.utxo_monitor.utxos = {}
+        self.utxo_monitor.spent_outputs = set()
+        for block_data in all_blocks.values():
+            block = Block.deserialize(block_data)
             self.update_utxo(block.txs_data)
 
     def reload_mempool_from_DB(self):
@@ -225,8 +279,7 @@ class Mempool:
 # 使用示例
 if __name__ == "__main__":
     # 初始化组件
-    network = None # NetworkInterface()
-    mempool = Mempool(network=network)
+    mempool = Mempool(p2p_port = 5000)
 
     # 创建测试交易
     tx1 = Transaction.create_coinbase_Tx(0, "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", 625000000)
