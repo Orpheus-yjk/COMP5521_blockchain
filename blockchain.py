@@ -32,6 +32,7 @@ import logging
 import copy
 
 from transactions import Transaction
+from db_module import LevelDBModule
 
 __all__ = ['BlockHeader', 'Block', 'Blockchain']
 
@@ -166,8 +167,13 @@ class Blockchain:
         4.广播新链
             节点A切换成功后，向邻居广播自己的新链状态。
     """
-    def __init__(self):
+    def __init__(self, p2p_port, db=None):
         self.blockchain = []
+        self.p2p_port = p2p_port
+        try:
+            self.db = db if db else LevelDBModule(db_name="blockchain_rawdata_port_" + str(p2p_port))
+        except:
+            self.db = db  # 初始化LevelDB，将区块链数据持久化到LevelDB
 
     def height(self):
         """返回区块链高度"""
@@ -180,15 +186,48 @@ class Blockchain:
     def add_block(self, block):
         """添加区块"""
         self.blockchain.append(block)
+        # 存储到LevelDB
+        self.db.save_block(block.block_hash, block.serialize())
 
     def reload_blockchain(self, one_Blockchain) -> bool:
-        """因为区块链共识的原因需要重载blockchain。区块验证在network中做"""
+        """重载区块链"""
         if self.validate_blockchain(one_Blockchain):
-            self.blockchain = copy.deepcopy(one_Blockchain.blockchain)
-            return True
-        else: return False
+            # 清空本地 LevelDB 数据
+            if self.is_db_connected():
+                try:
+                    # 遍历删除所有区块
+                    for key, _ in self.db._db:
+                        self.db._db.delete(key)
+                    logging.info("已清空本地 LevelDB 数据")
+                except Exception as e:
+                    logging.error(f"清空 LevelDB 失败: {str(e)}")
+                    return False
 
-    def validate_blockchain(self, one_blockchain) -> bool:
+            # 更新内存中的区块链数据
+            self.blockchain = copy.deepcopy(one_Blockchain.blockchain)
+
+            # 重新保存所有区块到 LevelDB
+            for block in self.blockchain:
+                self.db.save_block(block.block_hash, block.serialize())
+
+            # 重建UTXO
+            self.rebuild_utxo()
+
+            return True
+        return False
+
+    def rebuild_utxo(self):
+        """从区块链重建UTXO"""
+        if hasattr(self, 'mempool'):
+            # 清空现有UTXO
+            self.mempool.utxo_monitor.utxos = {}
+            self.mempool.utxo_monitor.spent_outputs = set()
+
+            # 重新处理所有区块的交易
+            for block in self.blockchain:
+                self.mempool.update_utxo(block.txs_data)
+
+    def validate_blockchain(self, one_Blockchain) -> bool:
         """验证区块链的完整性和有效性  关键改进说明：
 
         区块哈希验证
@@ -211,18 +250,21 @@ class Blockchain:
         高度一致性验证
         确保区块链长度与高度值一致（高度=长度）。
         """
+        if not one_Blockchain.blockchain:
+            return True  # 空链视为有效
+
         previous_block = None
-        for block in one_blockchain.blockchain:
+        for block in one_Blockchain.blockchain:
             # 1. 验证区块自身哈希有效性
             if not block.validate_block():
-                logging.error(f"区块 {block.header.index} 哈希验证失败")
+                # logging.error(f"区块 {block.header.index} 哈希验证失败")
                 return False
 
             # 2. 验证工作量证明（难度目标）
             target = '0' * block.header.difficulty
             current_hash = block.header.calculate_blockheader_hash()
             if not current_hash.startswith(target):
-                logging.error(f"区块 {block.header.index} PoW验证失败，难度不匹配")
+                # logging.error(f"区块 {block.header.index} PoW验证失败，难度不匹配")
                 return False
 
             # 3. 验证Merkle根
@@ -230,43 +272,69 @@ class Blockchain:
             txids = [tx.Txid for tx in block.txs_data]
             calculated_merkle = MiningModule._calculate_merkle_root(txids)
             if calculated_merkle != block.header.merkle_root:
-                logging.error(f"区块 {block.header.index} Merkle根不匹配")
+                # logging.error(f"区块 {block.header.index} Merkle根不匹配")
                 return False
 
             # 4. 验证链式连接性
             if previous_block:
                 if block.header.prev_hash != previous_block.block_hash:
-                    logging.error(f"区块 {block.header.index} 前哈希不匹配")
+                    # logging.error(f"区块 {block.header.index} 前哈希不匹配")
                     return False
                 if block.header.index != previous_block.header.index + 1:
-                    logging.error(f"区块索引不连续，当前索引 {block.header.index}")
+                    # logging.error(f"区块索引不连续，当前索引 {block.header.index}")
                     return False
             else:
                 # 创世区块特殊检查
                 if not all(c == '0' for c in block.header.prev_hash):
-                    logging.error("创世区块前哈希不为0")
+                    # logging.error(f"创世区块前哈希不为0 {block.header.prev_hash}")
                     return False
 
             previous_block = block
 
         # 5. 区块链高度一致性验证
-        if len(one_blockchain.blockchain) != one_blockchain.height():
-            logging.error("区块链高度与区块数量不一致")
+        if len(one_Blockchain.blockchain) != one_Blockchain.height():
+            # logging.error("区块链高度与区块数量不一致")
             return False
 
         return True
 
+    def is_db_connected(self) -> bool:
+        """检查LevelDB连接是否正常"""
+        try:
+            return self.db is not None and hasattr(self.db, '_db')
+        except:
+            return False
+
     def serialize(self):
         """序列化整个区块链"""
         return {
-            'blockchain': [block.serialize() for block in self.blockchain]
+            'blockchain': [block.serialize() for block in self.blockchain],
+            # 'p2p_port': self.p2p_port  # 不传递port信息
         }
 
     @classmethod
-    def deserialize(cls, data):
+    def deserialize(cls, data, local_p2p_port, db=None):
         """反序列化区块链"""
-        chain = cls()
-        chain.blockchain = [Block.deserialize(block_data) for block_data in data['blockchain']]
+        chain = cls(local_p2p_port, db)  # 如果提供了现有数据库连接，使用它
+        if not chain.db:
+            try:
+                chain.db = LevelDBModule(db_name="blockchain_rawdata_port_" + str(local_p2p_port))
+            except:
+                logging.warning("LevelDB数据库连接已存在")
+                pass
+        # 优先从LevelDB加载
+        sidechain = [Block.deserialize(block_data) for block_data in data['blockchain']]
+        chain.blockchain = sidechain
+        if_data_correct = chain.validate_blockchain(chain)
+        if chain.db:
+            all_blocks = chain.db.get_all_blocks()
+            if all_blocks:
+                chain.blockchain = [Block.deserialize(block_data) for block_data in all_blocks.values()]
+        if chain.validate_blockchain(chain):
+            if not (if_data_correct and len(sidechain)>chain.height()):
+                return chain
+        # 其次从参数读取
+        chain.blockchain = sidechain
         return chain
 
 if __name__ == "__main__":
