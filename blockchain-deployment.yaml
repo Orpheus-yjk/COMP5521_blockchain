@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blockchain-node
+spec:
+  replicas: 3  # 运行3个节点
+  selector:
+    matchLabels:
+      app: blockchain
+  template:
+    metadata:
+      labels:
+        app: blockchain
+    spec:
+      containers:
+      - name: blockchain
+        image: blockchain-node
+        ports:
+        - containerPort: 5000  # P2P端口
+        - containerPort: 5001  # API端口
+        env:
+        - name: PEER_NODES
+          value: "blockchain-node-0.blockchain-service.default.svc.cluster.local:5000,blockchain-node-1.blockchain-service.default.svc.cluster.local:5000"
+        volumeMounts:
+        - name: blockchain-data
+          mountPath: /app/data
+      volumes:
+      - name: blockchain-data
+        persistentVolumeClaim:
+          claimName: blockchain-pvc
