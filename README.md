@@ -99,6 +99,8 @@ COMP5521分布式账本技术、加密货币和电子支付 期末项目介绍�
 
 ![](pics/success.jpg)
 
+### Total Code Size: 3457 lines
+
 ```python
 # -*- coding: utf-8 -*-
 """
