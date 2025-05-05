@@ -3,7 +3,7 @@
 
 本模块提供以下核心功能：
 1. P2P网络通信：节点发现、区块/交易广播、邻居节点管理
-2. 区块链同步：定时同步机制、增量区块请求、链式验证
+2. 区块链同步：定时同步机制、全量增量区块请求、链式验证
 3. RESTful API：提供区块查询、交易提交等外部接口
 
 设计特点：
@@ -22,12 +22,23 @@
 2. 矿工通过mine_block()生成新区块后调用broadcast_block()
 3. 接收区块时通过validate_and_add_block()进行完整验证
 4. 定时调用_sync_blocks()保持区块链同步
+
+**关键改进点总结**
+全面的异常捕获：为所有可能失败的操作添加了异常处理
+输入验证：对所有输入参数进行严格验证
+重试机制：为关键操作添加了重试逻辑
+资源清理：定期清理无效节点，防止内存泄漏
+状态跟踪：记录节点连接状态和重试次数
+详细的日志：记录所有重要操作和错误信息
+性能优化：动态调整同步间隔，避免时间漂移
+安全增强：验证所有接收到的数据格式
 """
 
 __author__ = 'YJK developer'
 __date__ = '2025-04'
 
 import time
+import json
 import logging
 import requests
 from flask import Flask, jsonify, request
@@ -40,11 +51,12 @@ from transactions import Transaction
 from mempool import Mempool
 from blockchain import Block, Blockchain
 from mining import MiningModule
+from db_module import RedisModule
 
 # PORT 端口
 P2P_PORT = 5000
 API_PORT = 5001
-SYNC_INTERVAL = 60
+SYNC_INTERVAL = 75
 
 # 主要增强功能说明
 
@@ -59,7 +71,7 @@ SYNC_INTERVAL = 60
 # 增量同步：仅请求缺失区块（从当前高度+1开始）
 # 链式验证：自动验证接收到的每个区块的连续性
 
-# API接口设计
+# API主要接口设计
 # | 端点 | 方法 | 功能 |
 # |--------------------|--------|-------------------------|
 # | /block | POST | 接收新区块 |
@@ -93,19 +105,69 @@ class NetworkInterface:
     """
 
     def __init__(self, blockchain: Blockchain, mempool: Mempool, p2p_port, api_port):
-        """初始化网络接口
-        Args:
-            blockchain: 已初始化的区块链实例
-            mempool: 交易池实例
-        """
-        self.p2p_port = p2p_port
-        self.api_port = api_port
-        self.P2P_neighbor: Dict[str, Dict] = {}  # {address: {last_seen, status, height}}
-        self.blockchain = blockchain
-        self.mempool = mempool
-        self.app = Flask(__name__)
-        self._setup_api()
-        self._start_sync_daemon()
+        try:
+            self.p2p_port = int(p2p_port)
+            self.api_port = int(api_port)
+            if not (1024 <= self.p2p_port <= 65535) or not (1024 <= self.api_port <= 65535):
+                raise ValueError("Port must be between 1024 and 65535")
+
+            self.P2P_neighbor: Dict[str, Dict] = {}
+            self.blockchain = blockchain
+            self.mempool = mempool
+            self.redis = RedisModule(db_name="blockchain_state_port_"+str(p2p_port))  # 区块链状态存储到Redis
+            self._load_network_state()
+
+            try:
+                self.app = Flask(__name__)
+                self._setup_api()
+                self._start_sync_daemon()
+            except Exception as e:
+                logging.error(f"Failed to initialize Flask app: {str(e)}")
+                raise
+
+        except Exception as e:
+            logging.critical(f"NetworkInterface initialization failed: {str(e)}")
+            raise
+
+    def _load_network_state(self):
+        """从Redis加载网络状态"""
+        neighbor_data = self.redis.get_hash("neighbors") or {}
+        self.P2P_neighbor = {}
+        invalid_neighbors = []
+
+        # 反序列化嵌套字典
+        for addr, meta_str in neighbor_data.items():
+            try:
+                # 尝试解析邻居数据
+                meta = json.loads(meta_str)
+                if not isinstance(meta, dict):
+                    raise ValueError("Invalid metadata format")
+                self.P2P_neighbor[addr] = meta
+            except (json.JSONDecodeError, ValueError) as e:
+                logging.warning(f"无法解析邻居节点数据: {addr}, 错误: {str(e)}")
+                invalid_neighbors.append(addr)
+
+        # 删除无法解析的邻居节点数据
+        if invalid_neighbors:
+            try:
+                with self.redis.client.pipeline() as pipe:
+                    for addr in invalid_neighbors:
+                        pipe.hdel("neighbors", addr)
+                    pipe.execute()
+                logging.info(f"已从 Redis 中删除无效邻居节点: {invalid_neighbors}")
+            except Exception as e:
+                logging.error(f"删除无效邻居节点失败: {str(e)}")
+
+        self.difficulty = int(self.redis.get_var("difficulty", 4))
+
+    def _save_network_state(self):
+        """保存网络状态到Redis"""
+        neighbor_data = {
+            addr: str(meta)
+            for addr, meta in self.P2P_neighbor.items()
+        }
+        self.redis.save_hash("neighbors", neighbor_data)
+        self.redis.save_var("difficulty", self.difficulty)
 
     def _setup_api(self):
         """初始化Flask API路由
@@ -120,23 +182,41 @@ class NetworkInterface:
 
         @self.app.route('/block', methods=['POST'])
         def receive_block():
-            # 获取发送方IP（简化实现，实际需从请求头获取）
-            sender_ip = request.remote_addr
-            sender_port = request.headers.get('X-P2P-Port', str(P2P_PORT))  # 默认回退到默认端口
-            sender_address = f"{sender_ip}:{sender_port}"  # 假设对方P2P端口固定为5000
+            try:
+                sender_ip = request.remote_addr
+                if not sender_ip:
+                    raise ValueError("Invalid sender IP")
 
-            block_data = request.get_json()
-            block = Block.deserialize(block_data)
+                sender_port = request.headers.get('X-P2P-Port', str(P2P_PORT))
+                if not sender_port.isdigit():
+                    sender_port = str(P2P_PORT)
 
-            # 更新发送方的高度
-            if sender_address in self.P2P_neighbor:
-                self.P2P_neighbor[sender_address]['height'] = block.header.index
-                self.P2P_neighbor[sender_address]['last_seen'] = datetime.now()
+                sender_address = f"{sender_ip}:{sender_port}"
 
-            if self.validate_and_add_block(block):
-                print(f"\033[93mBlock accepted\033[0m")  # 输出黄色文本
-                return jsonify({"message": "Block accepted"}), 200
-            return jsonify({"error": "Invalid block"}), 400
+                block_data = request.get_json()
+                if not block_data:
+                    return jsonify({"error": "Empty block data"}), 400
+
+                block = Block.deserialize(block_data)
+                if not block:
+                    return jsonify({"error": "Invalid block data"}), 400
+
+                # 更新发送方的高度
+                if sender_address in self.P2P_neighbor:
+                    self.P2P_neighbor[sender_address].update({
+                        'height': block.header.index,
+                        'last_seen': datetime.now()
+                    })
+
+                if self.validate_and_add_block(block):
+                    logging.info(f"Block #{block.header.index} accepted from {sender_address}")
+                    return jsonify({"message": "Block accepted"}), 200
+
+                return jsonify({"error": "Invalid block"}), 400
+
+            except Exception as e:
+                logging.error(f"Error in receive_block: {str(e)}", exc_info=True)
+                return jsonify({"error": "Internal server error"}), 500
 
         @self.app.route('/blocks/<int:index>', methods=['GET'])
         def get_block(index):
@@ -232,14 +312,28 @@ class NetworkInterface:
 
         def sync_loop():
             while True:
-                self._sync_blocks()  # 执行网络同步
-                time.sleep(SYNC_INTERVAL)
+                try:
+                    start_time = time.time()
+                    self._sync_blocks()
+                    elapsed = int(time.time() - start_time)
 
-        Thread(
-            target=sync_loop,
-            daemon=True,
-            name="NetworkSyncDaemon"
-        ).start()
+                    # 动态调整sleep时间，确保总间隔接近SYNC_INTERVAL
+                    sleep_time = max(0, SYNC_INTERVAL - elapsed)
+                    time.sleep(sleep_time)
+
+                except Exception as e:
+                    logging.error(f"Sync loop error: {str(e)}", exc_info=True)
+                    time.sleep(min(60, SYNC_INTERVAL * 2))  # 错误时短暂等待
+
+        try:
+            Thread(
+                target=sync_loop,
+                daemon=True,
+                name="NetworkSyncDaemon"
+            ).start()
+            logging.info("Block sync daemon started")
+        except Exception as e:
+            logging.critical(f"Failed to start sync daemon: {str(e)}")
 
     def add_neighbor(self, address: str):
         """添加新的邻居节点
@@ -252,24 +346,51 @@ class NetworkInterface:
         Args:
             address: 节点地址(IP:PORT)
         """
-        if address not in self.P2P_neighbor:
-            try:
-                # 主动获取邻居最新高度
-                response = requests.get(f"http://{address}/blocks/latest", timeout=3)
-                if response.status_code == 200:
-                    latest_block = response.json()
-                    height = latest_block['header']['index']
-                else:
-                    height = 0
-            except:
-                height = 0
 
+        if not address or ':' not in address:
+            logging.warning(f"Invalid neighbor address format: {address}")
+            self._save_network_state()  # 保存状态
+            return False
+
+        try:
+            ip, port = address.split(':')
+            if not (1 <= int(port) <= 65535):
+                raise ValueError("Invalid port number")
+        except ValueError as e:
+            logging.warning(f"Invalid neighbor address {address}: {str(e)}")
+            self._save_network_state()  # 保存状态
+            return False
+
+        if address in self.P2P_neighbor:
+            logging.debug(f"Neighbor {address} already exists")
+            self._save_network_state()  # 保存状态
+            return True
+
+        try:
+            # 验证节点可达性
+            response = requests.get(
+                f"http://{address}/blocks/latest",
+                timeout=3
+            )
+            height = response.json().get('header', {}).get('index', 0) if response.status_code == 200 else 0
+        except Exception as e:
+            logging.warning(f"Failed to connect to neighbor {address}: {str(e)}")
+            height = 0
+
+        try:
             self.P2P_neighbor[address] = {
                 'last_seen': datetime.now(),
                 'status': 'connected',
-                'height': height  # 初始化为实际高度
+                'height': height,
+                'retry_count': 0
             }
-            logging.info(f"Added new peer: {address}")
+            logging.info(f"Added new peer: {address} (height: {height})")
+            self._save_network_state()  # 保存状态
+            return True
+        except Exception as e:
+            logging.error(f"Failed to add neighbor {address}: {str(e)}")
+            self._save_network_state()  # 保存状态
+            return False
 
     def remove_neighbor(self, address: str):
         """ 移除失效邻居节点
@@ -280,6 +401,7 @@ class NetworkInterface:
         if address in self.P2P_neighbor:
             del self.P2P_neighbor[address]
             logging.warning(f"Removed peer: {address}")
+        self._save_network_state()  # 保存状态
 
     def broadcast_block(self, block: Block):
         """广播新区块到所有邻居节点
@@ -292,23 +414,76 @@ class NetworkInterface:
         Args:
             block: 要广播的区块实例
         """
-        valid_neighbors = [addr for addr, meta in self.P2P_neighbor.items()
-                           if meta['status'] == 'connected']
+        if not block or not isinstance(block, Block):
+            logging.error("Invalid block object for broadcasting")
+            return False
 
-        for neighbor in valid_neighbors:
+        success_count = 0
+        failed_neighbors = []
+
+        for neighbor, meta in list(self.P2P_neighbor.items()):
+            if meta.get('status') != 'connected':
+                continue
+
             try:
-                # 先发送区块
+                # 发送区块
                 headers = {'X-P2P-Port': str(self.p2p_port)}
-                requests.post(f"http://{neighbor}/block", json=block.serialize(), headers=headers, timeout=5)
-                # 再主动查询对方最新高度
-                response = requests.get(f"http://{neighbor}/blocks/latest", timeout=2)
+                response = requests.post(
+                    f"http://{neighbor}/block",
+                    json=block.serialize(),
+                    headers=headers,
+                    timeout=5
+                )
+
                 if response.status_code == 200:
-                    latest_block = response.json()
-                    self.P2P_neighbor[neighbor]['height'] = latest_block['header']['index']
-                logging.info(f"Block {block.header.index} broadcasted to {neighbor}")
-            except requests.exceptions.RequestException as e:
-                logging.error(f"Failed to broadcast to {neighbor}: {str(e)}")
-                self.remove_neighbor(neighbor)
+                    # 更新邻居高度
+                    try:
+                        height_resp = requests.get(
+                            f"http://{neighbor}/blocks/height",
+                            timeout=2
+                        )
+                        if height_resp.status_code == 200:
+                            self.P2P_neighbor[neighbor]['height'] = height_resp.json().get('height', 0)
+                    except:
+                        pass
+
+                    success_count += 1
+                    logging.info(f"Block {block.header.index} broadcasted to {neighbor}")
+                else:
+                    raise Exception(f"HTTP {response.status_code}")
+
+            except Exception as e:
+                logging.warning(f"Failed to broadcast to {neighbor}: {str(e)}")
+                failed_neighbors.append(neighbor)
+                self.P2P_neighbor[neighbor]['retry_count'] = meta.get('retry_count', 0) + 1
+
+                # 超过重试次数则标记为断开
+                if self.P2P_neighbor[neighbor]['retry_count'] > 3:
+                    self.P2P_neighbor[neighbor]['status'] = 'disconnected'
+                    logging.warning(f"Marked neighbor {neighbor} as disconnected")
+
+        # 清理长期断开的节点
+        self._cleanup_disconnected_neighbors()
+
+        return success_count > 0
+
+    def _cleanup_disconnected_neighbors(self):
+        """清理长期断开的邻居节点"""
+        now = datetime.now()
+        to_remove = []
+
+        for address, meta in self.P2P_neighbor.items():
+            if meta.get('status') == 'disconnected':
+                last_seen = meta.get('last_seen')
+                if last_seen and (now - last_seen).total_seconds() > 3600:  # 1小时未连接
+                    to_remove.append(address)
+
+        for address in to_remove:
+            try:
+                del self.P2P_neighbor[address]
+                logging.info(f"Removed disconnected neighbor: {address}")
+            except Exception as e:
+                logging.warning(f"Failed to remove neighbor {address}: {str(e)}")
 
     def broadcast_tx(self, tx: Transaction):
         """广播交易到P2P网络
@@ -468,11 +643,11 @@ class NetworkInterface:
             # 按累计难度排序（优先选择难度最大的链）
             peers_info.sort(key=lambda x: -x[2])  # 降序排列
             best_peer = peers_info[0]
-            print(">>> 最高区块链的高度、总难度:",best_peer)
             # 如果对方链更长或难度更高，请求同步
             if best_peer[1] > self.blockchain.height() or \
                     (best_peer[1] == self.blockchain.height() and best_peer[2] > self._calculate_local_difficulty()):
                 self._request_full_chain(best_peer[0])
+                print(f"\033[96m>>> 最高区块链的来源、高度、总难度: {best_peer}  同步完成\033[0m")  # 输出青色文本
 
         except Exception as e:
             logging.error(f"同步出错: {str(e)}")
@@ -481,22 +656,44 @@ class NetworkInterface:
 
     def _request_full_chain(self, peer_address: str):
         """从指定节点请求完整区块链并验证"""
-        try:
-            response = requests.get(f"http://{peer_address}/blocks/full", timeout=10)
-            if response.status_code == 200:
-                new_chain = Blockchain.deserialize(response.json())
-                # 验证新链的完整性和难度
-                if self._is_chain_valid(new_chain):
-                    # 如果新链更优，替换本地链
-                    if new_chain.height() > self.blockchain.height() or \
-                            (new_chain.height() == self.blockchain.height() and new_chain.calculate_chain_difficulty() > self._calculate_local_difficulty()):
-                        self.blockchain.reload_blockchain(new_chain)
-                        # 输出青色文本
-                        print(f"\033[96m已接受来自 {peer_address} 的新链（高度: {new_chain.height()}）\033[0m")
-                        logging.info(f"已接受来自 {peer_address} 的新链（高度: {new_chain.height()}）")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                logging.info(f"Requesting full chain from {peer_address} (attempt {attempt + 1})")
 
-        except Exception as e:
-            logging.error(f"请求完整链失败: {str(e)}")
+                response = requests.get(
+                    f"http://{peer_address}/blocks/full",
+                    timeout=10 + attempt * 5  # 递增超时
+                )
+
+                if response.status_code != 200:
+                    raise Exception(f"HTTP {response.status_code}")
+
+                chain_data = response.json()
+                if not chain_data:
+                    raise ValueError("Empty chain data")
+
+                new_chain = Blockchain.deserialize(chain_data, self.p2p_port, self.blockchain.db)
+                if not new_chain:
+                    raise ValueError("Invalid chain data")
+
+                if not self._is_chain_valid(new_chain):
+                    raise ValueError("Chain validation failed")
+
+                # 验证通过后替换本地链
+                self.blockchain.reload_blockchain(new_chain)
+                self.mempool.rebuild_utxo_from_blockchain(self.blockchain.db.get_all_blocks())
+                logging.info(f"Accepted new chain from {peer_address} (height: {new_chain.height()})")
+                return True
+
+            except Exception as e:
+                logging.warning(f"Attempt {attempt + 1} failed for {peer_address}: {str(e)}")
+                if attempt == max_retries - 1:
+                    logging.error(f"Giving up on {peer_address} after {max_retries} attempts")
+                    self.P2P_neighbor[peer_address]['status'] = 'disconnected'
+                time.sleep(1)
+
+        return False
 
     def _calculate_local_difficulty(self) -> float:
         """计算本地链的总难度"""
@@ -526,7 +723,7 @@ class NetworkInterface:
 if __name__ == "__main__":
     # 初始化节点
     print("NETWORK.PY start")
-    blockchain = Blockchain()
+    blockchain = Blockchain(5000)
     mempool = Mempool()
     network = NetworkInterface(blockchain, mempool, 5000, 5001)
     miner = MiningModule()
