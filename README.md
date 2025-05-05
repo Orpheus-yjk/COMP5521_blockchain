@@ -262,3 +262,194 @@ if __name__ == "__main__":
    - 交易池维护
 
 此实现满足项目要求中的网络通信、共识机制、数据存储等核心需求，不同节点可通过命令行实现区块链网络的交互操作，节点之间定期同步区块链数据。
+
+# 将项目部署到Kubernetes集群的指南
+
+要将这个区块链项目部署到Kubernetes集群，可以按照以下步骤进行：
+
+## 1. 容器化应用
+
+首先为每个组件创建Docker镜像：
+
+1. **创建Dockerfile**:
+```dockerfile
+FROM python:3.9-slim
+
+WORKDIR /app
+COPY . .
+
+RUN pip install -r requirements.txt
+
+CMD ["python", "client_bash.py", "--port", "5000", "--api-port", "5001"]
+```
+
+2. **构建镜像**:
+```bash
+docker build -t blockchain-node .
+```
+
+## 2. Kubernetes部署配置
+
+### 2.1 创建Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blockchain-node
+spec:
+  replicas: 3  # 运行3个节点
+  selector:
+    matchLabels:
+      app: blockchain
+  template:
+    metadata:
+      labels:
+        app: blockchain
+    spec:
+      containers:
+      - name: blockchain
+        image: blockchain-node
+        ports:
+        - containerPort: 5000  # P2P端口
+        - containerPort: 5001  # API端口
+        env:
+        - name: PEER_NODES
+          value: "blockchain-node-0.blockchain-service.default.svc.cluster.local:5000,blockchain-node-1.blockchain-service.default.svc.cluster.local:5000"
+        volumeMounts:
+        - name: blockchain-data
+          mountPath: /app/data
+      volumes:
+      - name: blockchain-data
+        persistentVolumeClaim:
+          claimName: blockchain-pvc
+```
+
+### 2.2 创建Service
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: blockchain-service
+spec:
+  selector:
+    app: blockchain
+  ports:
+    - name: p2p
+      port: 5000
+      targetPort: 5000
+    - name: api
+      port: 5001
+      targetPort: 5001
+  clusterIP: None  # 使用Headless Service
+```
+
+### 2.3 创建StatefulSet (替代Deployment, 如果需要稳定的网络标识)
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: blockchain-node
+spec:
+  serviceName: blockchain-service
+  replicas: 3
+  selector:
+    matchLabels:
+      app: blockchain
+  template:
+    metadata:
+      labels:
+        app: blockchain
+    spec:
+      containers:
+      - name: blockchain
+        image: blockchain-node
+        ports:
+        - containerPort: 5000
+        - containerPort: 5001
+        volumeMounts:
+        - name: blockchain-data
+          mountPath: /app/data
+  volumeClaimTemplates:
+  - metadata:
+      name: blockchain-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+```
+
+### 2.4 创建PersistentVolumeClaim
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: blockchain-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+## 3. 数据库服务部署
+
+由于项目使用了多种数据库(LevelDB, Redis, MongoDB)，可以:
+
+1. **Redis**:
+```bash
+helm install redis bitnami/redis
+```
+
+2. **MongoDB**:
+```bash
+helm install mongodb bitnami/mongodb
+```
+
+3. **LevelDB**不需要单独部署，因为它会作为本地存储
+
+## 4. 配置和部署
+
+1. 创建Kubernetes ConfigMap存储配置:
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blockchain-config
+data:
+  config.yaml: |
+    p2p_port: 5000
+    api_port: 5001
+    initial_peers: "blockchain-node-0.blockchain-service.default.svc.cluster.local:5000"
+```
+
+2. 应用所有配置:
+```bash
+kubectl apply -f blockchain-deployment.yaml
+kubectl apply -f blockchain-service.yaml
+kubectl apply -f blockchain-config.yaml
+```
+
+## 5. 网络配置考虑
+
+1. **Ingress控制器** - 暴露API端口给外部访问
+2. **网络策略** - 限制P2P通信只在区块链节点之间
+3. **服务发现** - 使用Kubernetes DNS服务发现其他节点
+
+## 6. 监控和日志
+
+1. 部署Prometheus和Grafana监控节点状态
+2. 配置ELK栈收集和分析日志
+
+## 7. 扩展考虑
+
+1. **水平扩展** - 增加更多节点副本
+2. **自动恢复** - 配置健康检查和自动重启
+3. **滚动更新** - 实现无缝升级区块链软件
+
+这个部署方案提供了高可用性和可扩展性，同时保持了区块链网络的P2P特性。根据实际需求，您可能需要调整存储大小、资源限制和副本数量。
