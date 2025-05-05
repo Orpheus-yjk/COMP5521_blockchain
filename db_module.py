@@ -1,5 +1,11 @@
 """
-数据库模型。
+数据库模型。实现了：
+区块链数据持久化：使用LevelDB存储完整的区块链数据
+状态管理：使用Redis存储网络状态、邻居节点列表和交易池
+UTXO管理：使用MongoDB存储未花费交易输出
+资源管理：确保数据库连接正确初始化和关闭
+
+这种分层存储架构既满足了持久化需求，又保证了高频访问数据的性能。LevelDB适合顺序写入的区块链数据，Redis适合快速访问的状态数据，MongoDB则适合结构化的UTXO数据。
 """
 
 __author__ = 'YJK developer'
@@ -73,15 +79,26 @@ class LevelDBModule:
             raise
 
     def get_all_blocks(self) -> dict:
-        """获取全部区块数据"""
+        """获取全部区块数据并按索引排序"""
         blocks = {}
         try:
+            # 先收集所有区块
             for key, value in self._db:
-                blocks[key.decode('utf-8')] = json.loads(value.decode('utf-8'))
-            return blocks
+                block_data = json.loads(value.decode('utf-8'))
+                blocks[block_data['header']['index']] = block_data
+
+            # 按索引排序
+            sorted_blocks = {}
+            for idx in sorted(blocks.keys()):
+                block_data = blocks[idx]
+                block_hash = idx.decode('utf-8') if isinstance(idx, bytes) else key
+                sorted_blocks[block_hash] = block_data
+
+            return sorted_blocks
         except Exception as e:
             logging.error(f"全量数据读取失败: {str(e)}")
             return {}
+
 
     def close(self):
         """关闭数据库连接"""
@@ -221,7 +238,12 @@ class RedisModule:
         :return: 是否成功
         """
         try:
-            return bool(self.client.hmset(self._get_key(hash_name), data))
+            # 改为使用 hset 替代已弃用的 hmset
+            with self.client.pipeline() as pipe:
+                for key, value in data.items():
+                    pipe.hset(self._get_key(hash_name), key, value)
+                pipe.execute()
+            return True
         except redis.RedisError as e:
             logging.error(f"保存哈希失败 {hash_name}: {str(e)}")
             return False
