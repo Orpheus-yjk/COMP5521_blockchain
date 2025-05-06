@@ -170,10 +170,15 @@ class Blockchain:
     def __init__(self, p2p_port, db=None):
         self.blockchain = []
         self.p2p_port = p2p_port
-        try:
-            self.db = db if db else LevelDBModule(db_name="blockchain_rawdata_port_" + str(p2p_port))
-        except:
-            self.db = db  # 初始化LevelDB，将区块链数据持久化到LevelDB
+
+        if db:    # 初始化LevelDB，将区块链数据持久化到LevelDB
+            self.db = db
+        else:
+            try:
+                self.db = LevelDBModule(db_name="blockchain_rawdata_port_" + str(p2p_port))
+            except:
+                self.db = None
+                logging.error("区块链无法连接到LevelDB")
 
     def height(self):
         """返回区块链高度"""
