@@ -23,6 +23,7 @@ import time
 import json
 import logging
 from typing import List
+from threading import Lock
 
 from transactions import Transaction
 from math_util import VerifyHashAndSignatureUtils
@@ -32,8 +33,18 @@ from db_module import RedisModule
 
 
 class UTXOManager:
-    """UTXO状态跟踪器"""
+    """UTXO状态跟踪器
+
+    并发问题场景：当多个线程或进程同时尝试修改UTXO集合时（例如区块同步和交易处理同时进行），可能导致UTXO状态不一致。
+    表现：UTXO添加失败
+    解决方案：在UTXOManager类中对关键操作（如add_utxo、mark_spent）加锁
+
+    数据库连接问题场景：MongoDB连接超时或断开，导致add_utxo操作失败。
+    表现：日志中显示MongoDB操作异常（如超时、连接重置）。
+    解决方案：增加重试机制
+    """
     def __init__(self, p2p_port):
+        self.lock = Lock()  # 初始化锁
         self.utxos = {}  # {txid: {vout_index: (amount, address)}}
         self.spent_outputs = set()  # {(txid, vout_index)}
         self.db = MongoDBModule(db_name="utxo_db_port_"+str(p2p_port))
@@ -41,6 +52,7 @@ class UTXOManager:
 
     def _load_utxos(self):
         """从MongoDB加载UTXO"""
+        self.utxos = {}
         utxos = self.db.get_utxos_by_address("*")  # 获取所有UTXO
         for utxo in utxos:
             if utxo['txid'] not in self.utxos:
@@ -48,15 +60,26 @@ class UTXOManager:
             self.utxos[utxo['txid']][utxo['vout_index']] = (
                 utxo['amount'], utxo['address'])
 
-    def add_utxo(self, txid: str, vout_index: int, amount: int, address: str):
+    def add_utxo(self, txid: str, vout_index: int, amount: int, address: str, script_pubkey: str, max_retries=3):
         """添加UTXO"""
-        if txid not in self.utxos:
-            self.utxos[txid] = {}
-        self.utxos[txid][vout_index] = (amount, address)
-        # 保存到MongoDB
-        self.db.add_utxo(txid, vout_index, amount, address, "")
+        for attempt in range(max_retries):
+            try:
+                with self.lock:  # 加锁
+                    if txid in self.utxos and vout_index in self.utxos[txid]:
+                        logging.warning(f"UTXO已存在: {txid}:{vout_index}")
+                        return False
+                    if txid not in self.utxos:
+                        self.utxos[txid] = {}
+                    self.utxos[txid][vout_index] = (amount, address)
+                    self.db.add_utxo(txid, vout_index, amount, address, script_pubkey)
+                    return True
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logging.error(f"UTXO添加失败（最终尝试）: {str(e)}")
+                    return False
+                time.sleep(1)
 
-    # 因为区块链是不允许修改的，所以不能这么写。UTXO实际上不会删除使用过的交易；而是通过标记输入为已花费
+    # 因为区块链是不允许修改的，所以不能这么写del_utxo。UTXO实际上不会删除使用过的交易；而是通过标记输入为已花费。除非重新加载区块链
     # def del_utxo(self, txid: str, vout_index: int):
     #     if txid not in self.utxos:
     #         raise ValueError("UTXO当中没有这个交易ID！")
@@ -73,13 +96,35 @@ class UTXOManager:
         return (txid, vout_index) in self.spent_outputs
 
     def get_balance(self, address: str) -> int:
-        """获取持有可使用utxo的总额"""
+        """获取指定地址的可用余额（未被花费的UTXO总额）"""
         balance = 0
-        for tx in self.utxos.values():
-            for vout in tx.values():
-                if vout[1] == address:
-                    balance += vout[0]
+        for txid, vouts in self.utxos.items():
+            for vout_index, (amount, addr) in vouts.items():
+                if addr == address and not self.is_spent(txid, vout_index):
+                    balance += amount
         return balance
+
+    def flush_data(self) -> bool:
+        """清除MongoDB utxo数据及内存中的UTXO状态
+
+        Returns:
+            bool: 是否成功清空所有数据
+        """
+        try:
+            # 清空MongoDB数据
+            result = self.db.utxo_collection.delete_many({})
+
+            # 清空内存中的UTXO状态
+            with self.lock:
+                self.utxos = {}
+                self.spent_outputs = set()
+
+            logging.info(f"成功清空UTXO数据，删除记录数: {result.deleted_count}")
+            return True
+
+        except Exception as e:
+            logging.error(f"UTXO清理失败 - {str(e)}")
+            return False
 
 
 class Mempool:
@@ -122,7 +167,7 @@ class Mempool:
                 break
             except Exception as e:
                 if attempt == max_retries - 1:
-                    raise
+                    raise RuntimeError(f"从Redis加载交易失败：{str(e)}")
                 time.sleep(1)
 
     def _save_transactions(self):
@@ -131,7 +176,12 @@ class Mempool:
         self.redis.push_list("transactions", *tx_list)
 
     def add_transaction(self, tx: Transaction) -> bool:
-        """添加交易到 Mempool，返回是否成功"""
+        """添加交易到 Mempool，返回是否成功
+
+        问题场景：无效交易（如双花）被尝试添加到UTXO集合。
+        表现：交易验证失败后仍尝试添加UTXO。
+        解决方案：在add_transaction中提前严格验证交易有效性
+        """
         # 1. 基础检查
         if tx.Txid in self.transactions:
             return False
@@ -147,6 +197,7 @@ class Mempool:
             if not self._evict_low_fee_tx():
                 return False
 
+        # 加入mempool
         self.transactions[tx.Txid] = tx
         self._save_transactions()
         return True
@@ -203,6 +254,7 @@ class Mempool:
 
     def update_utxo(self, block_transactions: List[Transaction]):
         """区块确认后更新UTXO"""
+
         for tx in block_transactions:
             # 标记输入为已花费
             for vin in tx.vins:
@@ -210,7 +262,7 @@ class Mempool:
 
             # 添加新UTXO
             for idx, vout in enumerate(tx.vouts):
-                self.utxo_monitor.add_utxo(tx.Txid, idx, vout.value, vout.pubkey_hash)
+                self.utxo_monitor.add_utxo(tx.Txid, idx, vout.value, vout.pubkey_hash, "OP_DUP OP_HASH160 {} OP_EQUALVERIFY OP_CHECKSIG".format(vout.pubkey_hash))
 
     def get_top_transactions(self, n: int) -> List[Transaction]:
         """获取手续费最高的前n笔交易（矿工调用）"""
@@ -248,23 +300,22 @@ class Mempool:
         self.add_transaction(new_Tx)
         return True
 
-    def on_blockchain_replaced(self, new_blockchain):
-        """当区块链被替换时，重置UTXO和交易池"""
-        self.utxo_monitor = UTXOManager(self.p2p_port)  # 重置UTXO
-        self.transactions.clear()  # 清空交易池
+    def rebuild_utxo_from_all_blocks(self, all_blocks):
+        """当区块链被替换时，重置UTXO和交易池
 
-        # 重新构建UTXO集（从新链的所有区块中）
-        for block in new_blockchain.blockchain:
-            self.update_utxo(block.txs_data)
-
-    def rebuild_utxo_from_blockchain(self, all_blocks):
-        """从区块链重建UTXO"""
-        # 清空现有数据
-        self.utxo_monitor.utxos = {}
-        self.utxo_monitor.spent_outputs = set()
-        for block_data in all_blocks.values():
-            block = Block.deserialize(block_data)
-            self.update_utxo(block.txs_data)
+        问题场景：区块链发生分叉后重组，UTXO状态需要回滚，但部分交易未被正确处理。
+        表现：UTXO添加失败，且日志中出现区块高度不一致的警告。
+        解决方案：在rebuild_utxo_from_all_blocks方法中确保UTXO完全重置
+        """
+        with self.utxo_monitor.lock:  # 加锁
+            self.utxo_monitor = UTXOManager(self.p2p_port)  # 完全重建UTXO集
+            # can_flush_db == False 是增量构建，如果中间经过了竞争挖矿导致的换链，会保留原来区块链废弃的块，一般不用
+            can_flush_db = True
+            if can_flush_db:
+                self.utxo_monitor.flush_data()  # 清理废旧的utxo数据
+            for block_data in all_blocks.values():
+                block = Block.deserialize(block_data)
+                self.update_utxo(block.txs_data)
 
     def reload_mempool_from_DB(self):
         """从数据库恢复类的所有数据"""
