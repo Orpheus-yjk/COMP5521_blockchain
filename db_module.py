@@ -51,7 +51,7 @@ class LevelDBModule:
         try:
             serialized = json.dumps(block_data).encode('utf-8')
             self._db.put(block_hash.encode('utf-8'), serialized)
-            logging.debug(f"区块 {block_hash[:8]}... 保存成功")
+            logging.info(f"区块 {block_hash[:8]}... 保存成功")
         except Exception as e:
             logging.error(f"数据保存失败: {str(e)}")
             raise
@@ -85,23 +85,25 @@ class LevelDBModule:
             # 先收集所有区块
             for key, value in self._db:
                 block_data = json.loads(value.decode('utf-8'))
-                blocks[block_data['header']['index']] = block_data
+                blocks[block_data['header']['index']] = {
+                    'hash': key.decode('utf-8'),  # 原始键是区块哈希
+                    'data': block_data
+                }
 
-            # 按索引排序
+            # 按索引排序并构建结果字典
             sorted_blocks = {}
             for idx in sorted(blocks.keys()):
-                block_data = blocks[idx]
-                block_hash = idx.decode('utf-8') if isinstance(idx, bytes) else key
-                sorted_blocks[block_hash] = block_data
+                block_info = blocks[idx]
+                sorted_blocks[block_info['hash']] = block_info['data']
 
             return sorted_blocks
+
         except Exception as e:
-            logging.error(f"全量数据读取失败: {str(e)}")
+            logging.error(f"从LevelDB数据库读取全量区块链数据失败: {str(e)}")
             return {}
 
-
     def close(self):
-        """关闭数据库连接"""
+        """关闭LevelDB数据库连接"""
         if self._db:
             self._db.close()
             logging.info("数据库连接已关闭")
@@ -260,6 +262,57 @@ class RedisModule:
             logging.error(f"获取哈希失败 {hash_name}: {str(e)}")
             return {}
 
+    def del_hash(self, hash_name: str, key: str) -> bool:
+        """
+        删除哈希表中的指定键
+        :param hash_name: 哈希表名
+        :param key: 要删除的键
+        :return: 是否成功（True=键存在且被删除，False=键不存在或操作失败）
+        """
+        try:
+            deleted = self.client.hdel(self._get_key(hash_name), key)
+            return deleted > 0
+        except redis.RedisError as e:
+            logging.error(f"删除哈希键失败 {hash_name}:{key} - {str(e)}")
+            return False
+
+    def del_bulk_hash(self, hash_name: str, keys: List[str]) -> int:
+        """
+        批量删除哈希表中的多个键
+        :param hash_name: 哈希表名（无需包含前缀）
+        :param keys: 要删除的键列表
+        :return: 实际删除的键数量
+        """
+        if not keys:
+            return 0
+
+        try:
+            # 使用 pipeline 批量操作
+            with self.client.pipeline() as pipe:
+                full_key = self._get_key(hash_name)  # 获取带前缀的完整键名
+                for key in keys:
+                    pipe.hdel(full_key, key)  # 传递完整键名和字段名
+                results = pipe.execute()
+            return sum(results)
+        except redis.RedisError as e:
+            logging.error(f"批量删除哈希键失败 {hash_name} - {str(e)}")
+            return 0
+
+    def del_all_hash(self, hash_name: str) -> bool:
+        """
+        彻底删除 Redis 中指定哈希表的所有键（清空整个哈希表）
+        :param hash_name: 哈希表名（无需包含前缀）
+        :return: 是否成功（True=删除成功，False=失败或哈希表不存在）
+        """
+        try:
+            full_key = self._get_key(hash_name)  # 获取带前缀的完整键名
+            # 使用 DEL 命令直接删除整个哈希表（比逐字段删除更高效）
+            deleted = self.client.delete(full_key)
+            return deleted > 0  # 返回是否实际删除了键
+        except redis.RedisError as e:
+            logging.error(f"删除哈希表 {hash_name} 失败: {str(e)}")
+            return False
+
     # ----------------- 实用方法 -----------------
     def clear_all(self) -> bool:
         """清空当前数据库所有数据"""
@@ -381,7 +434,9 @@ class MongoDBModule:
         :param min_amount: 最小金额筛选（可选）
         :return: UTXO列表
         """
-        query = {"address": address, "spent": False}
+        query = {"spent": False}
+        if address != "*":
+            query["address"] = address
         if min_amount is not None:
             query["amount"] = {"$gte": min_amount}
 
@@ -466,6 +521,7 @@ class MongoDBModule:
 if __name__ == "__main__":
 
     # LevelDB
+    print("Handle with LevelDB")
     # 配置日志
     logging.basicConfig(level=logging.INFO)
 
@@ -499,6 +555,7 @@ if __name__ == "__main__":
     db.close()
 
     # Redis
+    print("Handle with Redis")
     logging.basicConfig(level=logging.INFO)
 
     # 初始化
@@ -529,6 +586,7 @@ if __name__ == "__main__":
     redis_db.close()
 
     # mongodb
+    print("Handle with MongoDB")
     logging.basicConfig(level=logging.INFO)
 
     # 初始化
