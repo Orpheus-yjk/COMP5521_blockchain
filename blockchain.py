@@ -7,14 +7,14 @@ block_header包含区块的元数据，比如索引、时间戳、前一个区�
 Block类则组合了block_header和交易数据，并计算区块的哈希值。
 Blochcain类包含区块链的链式数据结构。
 
-Blochcain类的validate_blockchain函数的步骤可能包括：
+Blochcain类的validate_blockchain函数的步骤包括：
 1. 检查区块链中每个区块的索引是否连续，确保没有缺失或重复的区块。
 2. 验证每个区块的prev_hash是否与前一个区块的哈希一致，确保链条的正确连接。
 3. 调用每个区块的validate_block方法，确保区块自身的数据（如哈希计算）是正确的。
 4. 验证每个区块的工作量证明，即区块哈希是否满足当时的难度要求（以指定数量的前导零开头）。
 5. 检查Merkle根是否正确，确保交易数据没有被篡改。
 6. 可能需要验证区块中的交易，比如检查交易签名和UTXO是否有效，但根据现有代码，这部分可能在mempool或网络层处理，暂时不在此函数中实现。
-可能的实现步骤：
+实现步骤：
 - 遍历区块链中的所有区块。
 - 对于每个区块，检查其索引是否为前一个区块索引+1。
 - 检查prev_hash是否等于前一个区块的哈希。
@@ -78,7 +78,7 @@ class Block():
 
     头部信息 + 交易数据 + 自动计算区块哈希（双重SHA-256加密）。类似"账本的一页纸"，记录交易信息，供Transaction查询使用。
     """
-    def __init__(self, index=0, timestamp=0, prev_hash="0", difficulty=0, merkle_root=0, nonce=0, txs_data=[]):
+    def __init__(self, index=0, timestamp=0, prev_hash="0", difficulty=0, merkle_root=0, nonce=0, txs_data=None):
         """
         :param index: 索引号
         :param timestamp: 时间戳
@@ -88,6 +88,7 @@ class Block():
         :param nonce: 随机数
         :param txs_data: 该区块搭载的成功交易的信息（transactions, txs）
         """
+        txs_data = txs_data if txs_data else []
         if len(txs_data)>TRANSACTION_LIMIT:
             logging.warning(f"Block contains too many Transactions(more than {TRANSACTION_LIMIT}) and may not be accept by validators.")
         self.header=BlockHeader(
@@ -171,8 +172,8 @@ class Blockchain:
         self.blockchain = []
         self.p2p_port = p2p_port
 
-        if db:    # 初始化LevelDB，将区块链数据持久化到LevelDB
-            self.db = db
+        if db:
+            self.db = db    # 初始化LevelDB，将区块链数据持久化到LevelDB
         else:
             try:
                 self.db = LevelDBModule(db_name="blockchain_rawdata_port_" + str(p2p_port))
@@ -214,45 +215,32 @@ class Blockchain:
             # 重新保存所有区块到 LevelDB
             for block in self.blockchain:
                 self.db.save_block(block.block_hash, block.serialize())
-
-            # 重建UTXO
-            self.rebuild_utxo()
-
             return True
+
         return False
 
-    def rebuild_utxo(self):
-        """从区块链重建UTXO"""
-        if hasattr(self, 'mempool'):
-            # 清空现有UTXO
-            self.mempool.utxo_monitor.utxos = {}
-            self.mempool.utxo_monitor.spent_outputs = set()
-
-            # 重新处理所有区块的交易
-            for block in self.blockchain:
-                self.mempool.update_utxo(block.txs_data)
-
-    def validate_blockchain(self, one_Blockchain) -> bool:
+    @staticmethod
+    def validate_blockchain(one_Blockchain) -> bool:
         """验证区块链的完整性和有效性  关键改进说明：
 
-        区块哈希验证
+        1.区块哈希验证
         调用每个区块的validate_block()方法，确保区块数据未被篡改。
 
-        工作量证明（PoW）验证
+        2.工作量证明（PoW）验证
         检查区块哈希是否满足该区块难度要求（前导零数量）。
 
-        Merkle根验证
+        3.Merkle根验证
         重新计算交易的Merkle根，确保交易数据完整性。
 
-        链式结构验证
+        4.链式结构验证
 
-        检查前哈希（prev_hash）的连续性
+        5.检查前哈希（prev_hash）的连续性
 
-        检查索引号的递增性
+        6.检查索引号的递增性
 
-        创世区块前哈希必须为"0"
+        7.创世区块前哈希必须为"0"
 
-        高度一致性验证
+        8.高度一致性验证
         确保区块链长度与高度值一致（高度=长度）。
         """
         if not one_Blockchain.blockchain:
@@ -310,6 +298,16 @@ class Blockchain:
         except:
             return False
 
+    def load_chaindata_from_db(self):
+        """从LevelDB加载区块链数据"""
+        if self.is_db_connected():
+            try:
+                all_blocks = self.db.get_all_blocks()
+                if all_blocks:
+                    self.blockchain = [Block.deserialize(block_data) for block_data in all_blocks.values()]
+            except:
+                pass
+
     def serialize(self):
         """序列化整个区块链"""
         return {
@@ -330,12 +328,12 @@ class Blockchain:
         # 优先从LevelDB加载
         sidechain = [Block.deserialize(block_data) for block_data in data['blockchain']]
         chain.blockchain = sidechain
-        if_data_correct = chain.validate_blockchain(chain)
+        if_data_correct = Blockchain.validate_blockchain(chain)
         if chain.db:
             all_blocks = chain.db.get_all_blocks()
             if all_blocks:
                 chain.blockchain = [Block.deserialize(block_data) for block_data in all_blocks.values()]
-        if chain.validate_blockchain(chain):
+        if Blockchain.validate_blockchain(chain):
             if not (if_data_correct and len(sidechain)>chain.height()):
                 return chain
         # 其次从参数读取
