@@ -214,19 +214,45 @@ class Transaction(CoinbaseScript, StandardTransactionScript, VerifyHashAndSignat
             sys.getsizeof(out) for out in self.vouts
         )
 
-    def calculate_raw_size(self) -> int:  # 基础内存计算（非 SegWit 交易）
+    def calculate_raw_size(self) -> int:
         """计算交易原始字节大小（单位：字节）"""
-        # 序列化交易数据
-        serialized_tx = StandardTransactionScript.serialize_Tx(self.serialize())
-        return len(serialized_tx)
+        # 构造符合StandardTransactionScript.serialize_Tx要求的输入格式
+        tx_data = {
+            "version": 1,  # 假设版本为1
+            "locktime": self.nlockTime,
+            "vins": [
+                {
+                    "txid": vin.txid,
+                    "referid": vin.referid,
+                    "scriptSig": vin.signature,  # 这里直接使用签名，因为StandardTransactionScript会处理
+                    "sequence": 0xFFFFFFFF  # 默认序列号
+                } for vin in self.vins
+            ],
+            "vouts": [
+                {
+                    "value": vout.value,
+                    "script_pubkey_hash": vout.pubkey_hash
+                } for vout in self.vouts
+            ]
+        }
+        try:
+            serialized_tx = StandardTransactionScript.serialize_Tx(tx_data)
+            return len(serialized_tx)
+        except Exception as e:
+            logging.error(f"计算交易大小时出错: {str(e)}")
+            return 0  # 返回0作为容错处理
 
     def calculate_fee(self, fee_rate: float) -> int:
         """根据费率计算手续费（单位：satoshi）"""
         return int(self.calculate_raw_size() * fee_rate)
 
-    def update_fee(self, fee_rate):
-        """更新Transaction的fee"""
+    def update_feerate(self, fee_rate):
+        """更新Transaction的feerate并同步计算fee"""
         self.fee = self.calculate_fee(fee_rate=fee_rate)
+
+    def update_fee(self, fee):
+        """直接更新fee"""
+        self.fee = fee
 
     @staticmethod
     def generate_Txid(is_coinbase, *args) -> Tuple[str, dict]:
@@ -250,8 +276,8 @@ class Transaction(CoinbaseScript, StandardTransactionScript, VerifyHashAndSignat
                 input_referids.append(vin.referid)
 
                 # 比特币标准解锁脚本 P2PKH: unlock_script = <sig> <pubKey>
-                # 处理 pubkey：如果是 bytes，则解码；如果是 str，直接使用
-                pubkey_str = vin.pubkey.decode('utf8') if isinstance(vin.pubkey, bytes) else vin.pubkey
+                # 处理 pubkey：如果是 bytes，则用hex解码；如果是 str，直接使用
+                pubkey_str = vin.pubkey.hex() if isinstance(vin.pubkey, bytes) else vin.pubkey
                 this_unlockscript = ' '.join(
                     [vin.signature.hex() if isinstance(vin.signature, bytes) else vin.signature, pubkey_str])
                 input_scripts.append(this_unlockscript)
@@ -274,7 +300,6 @@ class Transaction(CoinbaseScript, StandardTransactionScript, VerifyHashAndSignat
         """创建普通的单笔交易。"""
         Tx = cls(vins, vouts, nlockTime)
         Tx.Txid, _ = Transaction.generate_Txid(False, vins, vouts, nlockTime)
-        Tx.update_fee(fee_rate=20)
         return Tx
 
     @classmethod
@@ -283,9 +308,10 @@ class Transaction(CoinbaseScript, StandardTransactionScript, VerifyHashAndSignat
         # Coinbase的Txid要进行特殊修改，防止因为不包含随机数导致错误
         Txid, Tx_script = CoinbaseScript.generate_coinbase_Txid(block_height, miner_address, mining_reward)
         # 解析
-        # FIXME: 容易出错
         tx_input = txInput(Txid, Tx_script["vins"][0]["referid"], CoinbaseScript.COINBASE_PUBLKEY, Tx_script["vins"][0]["scriptSig"])  # 签名人：超级节点
-        tx_output = txOutput(mining_reward, Tx_script["vouts"][0]["script_pubkey_hash"])
+        # tx_output = txOutput(mining_reward, Tx_script["vouts"][0]["script_pubkey_hash"])
+        tx_output = txOutput(mining_reward, miner_address)
+
         # 搭建
         Tx = cls([tx_input] , [tx_output], 0)  # FIXME: nlockTime应该设计为当前区块高度+100
         Tx.Txid = Txid
@@ -293,16 +319,23 @@ class Transaction(CoinbaseScript, StandardTransactionScript, VerifyHashAndSignat
 
     # 签署并验证
     def get_signature_message(self):
-        """自构造签名材料 - message"""
-
-        Tx_data = StandardTransactionScript.generate_Tx_script(
-            inputs=self.vins,
-            outputs=self.vouts,
-            nlockTime=self.nlockTime
-        )
-        serialized_Tx = StandardTransactionScript.serialize_Tx(Tx_data)
-        Tx_hash = hashlib.sha256(hashlib.sha256(serialized_Tx).digest()).digest()
-        return Tx_hash
+        """确保与签名时的序列化方式完全一致"""
+        tx_data = {
+            "version": 1,
+            "locktime": self.nlockTime,
+            "vins": [{
+                "txid": vin.txid,
+                "referid": vin.referid,
+                "scriptSig": vin.signature.hex() if isinstance(vin.signature, bytes) else vin.signature,
+                "sequence": 0xFFFFFFFF
+            } for vin in self.vins],
+            "vouts": [{
+                "value": vout.value,
+                "script_pubkey_hash": vout.pubkey_hash
+            } for vout in self.vouts]
+        }
+        serialized_tx = StandardTransactionScript.serialize_Tx(tx_data)
+        return hashlib.sha256(hashlib.sha256(serialized_tx).digest()).digest()
 
     @staticmethod
     def payer_sign(private_key: bytes, receiver_address: str, Tx_data: dict, txid: str, referid: int) -> Tuple[txInput, txOutput, bytes]:
@@ -329,7 +362,7 @@ class Transaction(CoinbaseScript, StandardTransactionScript, VerifyHashAndSignat
         Sig = VerifyHashAndSignatureUtils.sign_transaction(private_key=private_key, message=Tx_hash)
 
         tx_input = txInput(
-            txid=txid, referid=referid, pubkey=VerifyHashAndSignatureUtils.private_key_to_public_key(private_key), signature=Sig
+            txid=txid, referid=referid, pubkey=VerifyHashAndSignatureUtils.private_key_to_public_key(private_key), signature=Sig.hex()
         )
         vouts = Tx_data["vouts"]
         tx_output = txOutput(
