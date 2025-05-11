@@ -11,6 +11,7 @@ import time
 import json
 import logging
 import argparse
+
 from blockchain import Blockchain
 from mempool import Mempool
 from mining import MiningModule
@@ -35,24 +36,34 @@ class BlockchainClient:
             # 初始化矿工模块
             self.miner = MiningModule()
 
+            # 询问是否重设网络区块链同步时间间隔
+            if_reset_default_sync_time = input("\033[37;44m是否是否重设网络区块链同步时间间隔？(y/n): \033[0m\n\033[93m").strip().lower() == 'y'  # 白字蓝底，转黄字
+            print("\033[0m", end="")  # 转白字
+            _t = int(input("请输入重设的网络区块链同步时间间隔（整数，秒）>>>\n")) if if_reset_default_sync_time else None
             # 初始化网络接口，启动网络服务进程，清理邻居。同步区块链和内存池数据到网络端（后续也需要定期同步）
             self.network = NetworkInterface(
-                p2p_port = p2p_port,
-                api_port = api_port,
-                blockchain = Blockchain(p2p_port=p2p_port),  # 初始化区块链
-                mempool = Mempool(p2p_port = p2p_port)  # 初始化内存池， 连接Redis数据库和UTXO MongoDB数据库
+                p2p_port=p2p_port,
+                api_port=api_port,
+                blockchain=Blockchain(p2p_port=p2p_port),  # 初始化区块链
+                mempool=Mempool(p2p_port=p2p_port),  # 初始化内存池， 连接Redis数据库和UTXO MongoDB数据库
+                default_sync_time=_t
             )
 
             self.network.verify_db_connections()
             self.network.reset_mongodb()
             # 询问blockchain是否从LevelDB加载数据
-            if_load_from_db = input("是否从LevelDB加载区块链数据？(y/n): ").strip().lower() == 'y'
+            if_load_from_db = input("\033[37;44m是否从LevelDB加载区块链数据？(y/n): \033[0m\n\033[93m").strip().lower() == 'y'  # 白字蓝底，转黄字
+            print("\033[0m", end="")  # 转白字
             if not if_load_from_db:
                 print("清空LevelDB数据库...")
                 self.network.clear_leveldb()
             else:
                 self.network.blockchain.load_chaindata_from_db()  # 这里blockchain要从LevelDB中重载数据
-            if_clear_neighbor = input("是否清空redis数据库中余留的本节点邻居数据？(y/n): ").strip().lower() == 'y'
+                all_blocks = self.network.blockchain.db.get_all_blocks()
+                self.network.mempool.rebuild_utxo_from_all_blocks(all_blocks)  # 重构所有utxo(必要)
+            # 询问是否清除Redis中的节点邻居数据
+            if_clear_neighbor = input("\033[37;44m是否清空redis数据库中余留的本节点邻居数据？(y/n):\033[0m\n\033[93m").strip().lower() == 'y'  # 白字蓝底，转黄字
+            print("\033[0m", end="")  # 转白字
             if if_clear_neighbor:
                 print("清空redis数据库中余留的本节点邻居数据...")
                 self.network.P2P_neighbor = {}
@@ -60,7 +71,7 @@ class BlockchainClient:
 
         except Exception as e:
             self.network.cleanup_resources()
-            raise RuntimeError(f"初始化client失败: {str(e)}")
+            raise RuntimeError(f"\033[91m初始化client失败: {str(e)}\033[0m\n")   # 输出红色文本
 
     def add_peer(self, address):
         """添加邻居节点"""
@@ -82,7 +93,7 @@ class BlockchainClient:
             self.network.redis.save_var("difficulty", int(new_difficulty))  # 更新本地Redis难度
             print(f"成功挖到区块 #{new_block.header.index}")
         else:
-            print("挖矿失败，区块验证未通过")
+            print("\033[93m挖矿失败，区块验证未通过\033[0m")  # 输出黄色文本
 
     def sync_blocks(self):
         self.network._sync_blockchain()
@@ -94,7 +105,7 @@ class BlockchainClient:
         try:
             print(f"最新区块哈希: {self.network.blockchain.blockchain[-1].block_hash[:16]}...")
         except:
-            pass
+            print("没有区块数据")
         print(f"邻居节点数: {len(self.network.P2P_neighbor)}\n")
 
     def print_blockchain_details(self):
@@ -161,7 +172,7 @@ class BlockchainClient:
         """打印redis当中mempool的详细信息"""
         print("\n>>> 从redis中查看当前本地mempool的详细信息:")
         if not hasattr(self.network.mempool, 'redis'):
-            print("Redis连接不可用")
+            print("\033[91mRedis连接不可用\033[0m")  # 输出红色文本
             return
 
         try:
@@ -172,7 +183,7 @@ class BlockchainClient:
                 print(tx)
         except Exception as e:
             # 输出红色文本
-            print(f"\033[91m从Redis获取mempool数据失败: {str(e)}\033[0m")
+            print(f"\033[91m从Redis获取mempool数据失败: {str(e)}\033[0m")  # 输出青色文本
 
     def print_neighbor(self):
         """打印邻居节点的信息"""
@@ -186,7 +197,7 @@ class BlockchainClient:
         """从redis当中打印邻居节点的信息"""
         print("\n>>> 从redis中查看当前邻居节点的信息:")
         if not hasattr(self.network, 'redis'):
-            print("Redis连接不可用")
+            print("\033[91mRedis连接不可用\033[0m")  # 输出红色文本
             return
 
         try:
@@ -194,6 +205,7 @@ class BlockchainClient:
             for addr, meta in neighbors.items():
                 print(f"\033[96m>>> 邻居节点: {addr}\033[0m")
                 print(meta)
+            print("p2p邻居打印完毕")
         except Exception as e:
             # 输出红色文本
             print(f"\033[91m从Redis获取邻居节点信息失败: {str(e)}\033[0m")
@@ -212,6 +224,7 @@ class BlockchainClient:
             for addr in addresses:
                 balance = self.network.mempool.utxo_monitor.get_balance(addr)
                 print(f"地址 {addr}: {balance} YJK_satoshis")
+            print("当前所有地址的余额打印完毕")
         except Exception as e:
             # 输出红色文本
             print(f"\033[91m获取钱包余额失败: {str(e)}\033[0m")
@@ -220,7 +233,7 @@ class BlockchainClient:
         """从MongoDB当中打印utxo"""
         print("\n>>> 从MongoDB中查看当前所有地址的余额:")
         if not hasattr(self.network.mempool.utxo_monitor, 'db'):
-            print("MongoDB连接不可用")
+            print("\033[91mMongoDB连接不可用\033[0m")  # 输出红色文本
             return
 
         try:
@@ -243,8 +256,12 @@ class BlockchainClient:
         address = GenerateKeysUtils.public_key_to_public_address(pubkey)
         print(f"私钥登录地址: {address}")
         # 查询余额
-        balance = self.network.mempool.utxo_monitor.get_balance(address)
-        print(f"当前余额: {balance} YJK_satoshis")
+        try:
+            balance = self.network.mempool.utxo_monitor.get_balance(address)
+            print(f"当前余额: {balance} YJK_satoshis")
+        except Exception as e:
+            # 输出红色文本
+            print(f"\033[91m凭私钥登录钱包失败: {str(e)}\033[0m")
 
     def call_transfer(self, privkey_hex, recipient, amount, fee_rate):
         """端到端转账"""
@@ -261,49 +278,54 @@ class BlockchainClient:
                 if addr == address and not self.network.mempool.utxo_monitor.is_spent(txid, vout_idx):
                     utxos.append((txid, vout_idx, amt))
                     total += amt
-                    if total >= amount:
+                    if total > amount:  # '=' 不行，转账要收取fee
                         break
-            if total >= amount:
+            if total > amount:
                 break
 
-        if total < amount:
-            print("UTXO不足")
+        if total < amount:  # 账目不足
+            print(f"\033[93m账户-{address} （不计fee费用）可用UTXO不足。转账中止\033[0m")  # 输出黄色文本
             return
 
-        # 2. 构造交易输入和输出
+        # 2. 模拟构造交易输入：获取fee信息
         from transactions import txInput, txOutput, Transaction
         inputs = []
+        _tot_amt = 0
         for txid, vout_idx, amt in utxos:
-            # 获取UTXO对应的交易输出
-            utxo_tx = self.network.mempool.utxo_monitor.utxos[txid][vout_idx]
-
-            # 构造锁定脚本 (P2PKH格式)
-            locking_script = f"OP_DUP OP_HASH160 {address} OP_EQUALVERIFY OP_CHECKSIG"
-
-            # 构造交易数据
+            # 构造近似交易数据
             tx_data = {
                 "version": 1,
                 "locktime": 0,
                 "vins": [{
                     "txid": txid,
                     "referid": vout_idx,
-                    "scriptSig": "",  # 签名时填充
+                    "scriptSig": "",  # 即签名时填充 locking_script
+                    "sequence": 0xFFFFFFFF
+                }] if _tot_amt+amt <= amount else [{
+                    "txid": txid,
+                    "referid": vout_idx,
+                    "scriptSig": "",  # 即签名时填充 locking_script
+                    "sequence": 0xFFFFFFFF
+                }, {
+                    "txid": txid,
+                    "referid": vout_idx,
+                    "scriptSig": "",  # 即签名时填充 locking_script
                     "sequence": 0xFFFFFFFF
                 }],
                 "vouts": [{
-                    "value": amount,
+                    "value": amt,
                     "script_pubkey_hash": recipient
+                }] if _tot_amt+amt <= amount else [{
+                    "value": amount - _tot_amt,
+                    "script_pubkey_hash": recipient
+                }, {
+                    "value": _tot_amt+amt - amount,  # 近似返回费用
+                    "script_pubkey_hash": address
                 }]
             }
+            _tot_amt += amt
 
-            # 如果总输入大于转账金额，需要找零
-            if total > amount:
-                tx_data["vouts"].append({
-                    "value": total - amount,
-                    "script_pubkey_hash": address
-                })
-
-            # 签名交易
+            # 签名交易（对vin进行签名）
             tx_input, tx_output, signature = Transaction.payer_sign(
                 private_key=privkey,
                 receiver_address=recipient,
@@ -319,17 +341,81 @@ class BlockchainClient:
                 signature=signature.hex()
             ))
 
-        # 3. 构造交易输出
         outputs = [
-            txOutput(amount, recipient)
+            txOutput(amount, recipient),
+            txOutput(total-amount, address)  # 近似返回费用
         ]
-        # 添加找零输出（如果有）
-        if total > amount:
-            outputs.append(txOutput(total - amount - fee_rate, address))
+        mode_tx = Transaction.create_normal_tx(inputs, outputs, nlockTime=0)
+        mode_tx.update_feerate(fee_rate=fee_rate)  # 创建近似交易用来计算fee
+        fee = mode_tx.fee
+        if total > amount + fee:
+            outputs.append(txOutput(total-amount-fee, address))  # 添加找零输出（如果有）
+        elif total < amount + fee:
+            print(f"\033[93m账户-{address} 手续费不足。转账终止\033[0m")  # 输出黄色文本
+            return
 
-        # 4. 创建交易
-        tx = Transaction.create_normal_tx(inputs, outputs, nlockTime=0)
-        tx.fee = fee_rate  # 设置手续费
+        del mode_tx  # 删除近似交易
+        del inputs
+        del outputs
+
+        # 3. 创建准确交易
+        inputs = []
+        _tot_amt = 0
+        for txid, vout_idx, amt in utxos:
+            tx_data = {
+                "version": 1,
+                "locktime": 0,
+                "vins": [{
+                    "txid": txid,
+                    "referid": vout_idx,
+                    "scriptSig": "",  # 即签名时填充 locking_script
+                    "sequence": 0xFFFFFFFF
+                }] if _tot_amt + amt <= amount + fee else [{
+                    "txid": txid,
+                    "referid": vout_idx,
+                    "scriptSig": "",  # 即签名时填充 locking_script
+                    "sequence": 0xFFFFFFFF
+                }, {
+                    "txid": txid,
+                    "referid": vout_idx,
+                    "scriptSig": "",  # 即签名时填充 locking_script
+                    "sequence": 0xFFFFFFFF
+                }],
+                "vouts": [{
+                    "value": amt,
+                    "script_pubkey_hash": recipient
+                }] if _tot_amt + amt <= amount + fee else [{
+                    "value": amount - _tot_amt,
+                    "script_pubkey_hash": recipient
+                }, {
+                    "value": _tot_amt + amt -(amount+fee),  # 准确回返费用
+                    "script_pubkey_hash": address
+                }]
+            }
+            _tot_amt += amt
+
+            # 签名交易（对vin进行签名）
+            tx_input, tx_output, signature = Transaction.payer_sign(
+                private_key=privkey,
+                receiver_address=recipient,
+                Tx_data=tx_data,
+                txid=txid,
+                referid=vout_idx
+            )
+
+            inputs.append(txInput(
+                txid=txid,
+                referid=vout_idx,
+                pubkey=pubkey,
+                signature=signature.hex()
+            ))
+
+        outputs = [
+            txOutput(amount, recipient),
+            txOutput(total - amount - fee, address)  # 准确返回费用
+        ]
+        tx = Transaction.create_normal_tx(inputs, outputs, nlockTime=0)  # 创建完整的transaction
+        tx.update_fee(fee=fee)
 
         # 5. 添加到内存池并广播
         if self.network.mempool.add_transaction(tx):
@@ -341,9 +427,6 @@ class BlockchainClient:
             print(f"手续费: {fee_rate} YJK_satoshis")
             if total > amount:
                 print(f"找零: {total - amount - fee_rate} YJK_satoshis")
-        else:
-            print("交易无效或添加失败")
-
 
     def __del__(self):
         """清理资源"""
@@ -366,12 +449,12 @@ def main():
 
     # 命令行交互
     while True:
-        cmd = input("\n\033[37;44m请输入命令 (view/addpeer/mine/continuous_mine/transfer/sync/exit/standby) >>>\033[0m\n").strip().lower()  # 白字蓝底
+        cmd = input("\n请输入命令 (view/addpeer/mine/continuous_mine/transfer/sync/exit/standby) >>>\033[0m\n").strip().lower()  # 白字蓝底
         if cmd == "view":
             order = input("请选择查看的信息 (\033[93mhelp/blockchain_info/blockchain_details/blockchain_LevelDB/mempool_info/"
-                          "mempool_details/mempool_Redis/neighbor/neighbor_Redis/wallet/utxo_MongoDB\033[0m) >>>\n")  # 输出中间内容黄色文本
+                          "mempool_details/mempool_Redis/neighbor/neighbor_Redis/wallet/utxo_MongoDB\033[0m) >>>\n")  # 输出中间内容黄色文本，转黄字
             if order == "help":
-                print(">>> 命令提示")
+                print("\033[96mView~命令提示\033[0m")  # 输出青色文本
                 print(">>> blockchain_info : 打印区块链简要信息")
                 print(">>> blockchain_details : 打印区块链的详细信息")
                 print(">>> blockchain_LevelDB : 从LevelDB当中打印区块链的详细信息")
@@ -382,7 +465,7 @@ def main():
                 print(">>> neighbor_Redis : 打印redis当中mempool的详细信息")
                 print(">>> wallet : 查看utxo并打印所有地址的余额")
                 print(">>> utxo_MongoDB : 从MongoDB当中打印utxo")
-                print()
+                print("命令提示打印完毕")
 
             elif order == "blockchain_info":
                 client.print_blockchain_info()
