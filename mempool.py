@@ -212,34 +212,51 @@ class Mempool:
 
     def _validate_transaction(self, tx: Transaction) -> bool:
         """完整交易验证流程"""
+        print("\n--- 交易验证详细信息 ---")
+        print(f"交易ID: {tx.Txid}")
+        print("输入详情:")
+        for i, vin in enumerate(tx.vins):
+            print(f"输入{i}:")
+            print(f"  txid: {vin.txid}")
+            print(f"  referid: {vin.referid}")
+            print(f"  pubkey: {vin.pubkey.hex() if isinstance(vin.pubkey, bytes) else vin.pubkey}")
+            print(f"  signature: {vin.signature.hex() if isinstance(vin.signature, bytes) else vin.signature}")
         # 1. 验证输入有效性
         total_input = 0
         for vin in tx.vins:
+            print("vin: ",vin.serialize())
             # 检查UTXO是否存在且未花费
             is_coinbase = tx.is_coinbase(tx.generate_self_script())
+            print(is_coinbase)
             if self.utxo_monitor.is_spent(vin.txid, vin.referid):
                 logging.warning(f"双花检测: {vin.txid}:{vin.referid}")
                 return False
             elif vin.txid not in self.utxo_monitor.utxos.keys() and not is_coinbase:
                 logging.warning(f"未收到有关交易的任何信息，故无法使用: {vin.txid}:{vin.referid}")
                 return False
+
             if is_coinbase:
                 total_input += tx.vouts[0].value
                 continue
-
             utxo = self.utxo_monitor.utxos.get(vin.txid, {}).get(vin.referid)
             # 验证引用是否正确
             if not utxo:
                 logging.warning(f"未引用正确的tx在tx_input中: {vin.txid}:{vin.referid}")
                 return False
 
-            # 构造锁定脚本
-            # locking_script = f"OP_DUP OP_HASH160 {utxo[1]} OP_EQUALVERIFY OP_CHECKSIG"
+            message = tx.get_signature_message()
+            public_key = bytes.fromhex(vin.pubkey) if isinstance(vin.pubkey, str) else vin.pubkey
+            signature = bytes.fromhex(vin.signature) if isinstance(vin.signature, str) else vin.signature
+
             if not VerifyHashAndSignatureUtils.verify_signature(
-                    public_key=vin.pubkey,
-                    signature=bytes.fromhex(vin.signature),
-                    message=tx.get_signature_message()
+                    public_key=public_key,
+                    signature=signature,
+                    message=message
             ):
+                print("验证失败详细信息:")
+                print("Public Key:", public_key.hex())
+                print("Signature:", signature.hex())
+                print("Message:", message.hex())
                 logging.warning("签名验证失败")
                 return False
             total_input += utxo[0]
