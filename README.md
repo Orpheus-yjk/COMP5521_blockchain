@@ -93,13 +93,17 @@ COMP5521分布式账本技术、加密货币和电子支付 期末项目介绍�
 4. mining 引用 transactions blockchain
 5. network 引用 transaction_script transactions mempool blockchain mining
 
-## 二、简易`client.py` 实现 —— 不包含转账、节点分类（Miner/Full Node/SPV Node）
+## 二、简易`client.py` 实现
 
-### Successful Run Screen
+### Successful Run Screen —— 不包含转账 、节点分类（Miner/Full Node/SPV Node）
 
 ![](pics/success.jpg)
 
-### Total Code Size: 3457 lines
+### Successful Run Screen —— 包含转账、消息同步
+
+![](pics/success_tx_blk.jpg)
+
+### Total Code Size: 4000 lines
 
 ```python
 # -*- coding: utf-8 -*-
