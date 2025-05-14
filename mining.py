@@ -102,16 +102,48 @@ class MiningModule:
         """工作量证明挖矿"""
 
         # 动态难度调整
-        self._adjust_difficulty(self.chain_height+1)
+        self._adjust_difficulty(self.chain_height + 1)
 
         # 构造只包含coinbase交易的完整区块
         coinbase_tx = Transaction.create_coinbase_Tx(
-            self.chain_height+1,
+            self.chain_height + 1,
             miner_address,
             self.mining_reward  # 默认值500 * 10 ** 6 ，当前区块奖励
         )
-        txs = [coinbase_tx] + self.mempool.get_top_transactions(TRANSACTION_COUNT_LIMIT-1)  # 选择高优先级交易
-        merkle_root = MiningModule._calculate_merkle_root([tx.Txid for tx in txs])  # 计算默克尔根
+
+        # 获取待打包交易
+        candidate_txs = self.mempool.get_top_transactions(TRANSACTION_COUNT_LIMIT - 1)
+
+        # 检查双花问题
+        used_utxos = set()  # 记录已使用的UTXO
+        valid_txs = [coinbase_tx]  # 有效交易列表
+
+        for tx in candidate_txs:
+            # 跳过coinbase交易
+            from transactions import CoinbaseScript
+            if CoinbaseScript.is_coinbase(tx.generate_self_script()):
+                continue
+
+            # 检查交易输入是否已被使用
+            conflict = False
+            for vin in tx.vins:
+                utxo_key = (vin.txid, vin.referid)
+                if utxo_key in used_utxos:
+                    print(f"\033[93m检测到双花交易 txid: {tx.Txid[:8]}... 已丢弃，尝试使用已花费的UTXO-key {utxo_key}\033[0m")
+                    conflict = True
+                    break
+
+            if not conflict:
+                # 验证交易有效性
+                if self.mempool._validate_transaction(tx):
+                    # 记录使用的UTXO
+                    for vin in tx.vins:
+                        used_utxos.add((vin.txid, vin.referid))
+                    valid_txs.append(tx)
+                else:
+                    print(f"\033[93m交易验证失败 txid: {tx.Txid[:8]}... 已丢弃\033[0m")
+
+        merkle_root = MiningModule._calculate_merkle_root([tx.Txid for tx in valid_txs])  # 计算默克尔根
         # 构造区块头
         print(f"\033[96m>>> 当前挖矿难度: {self.difficulty}\033[0m")  # 输出青色文本
         block_header = BlockHeader(self.chain_height+1, int(time.time()), self.last_block_hash, self.difficulty, merkle_root, 0)
@@ -146,7 +178,7 @@ class MiningModule:
             difficulty=block_header.difficulty,
             merkle_root=block_header.merkle_root,
             nonce=block_header.nonce,
-            txs_data=txs
+            txs_data=valid_txs
         )
 
         return mined_block, self.difficulty
