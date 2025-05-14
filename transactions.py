@@ -309,7 +309,6 @@ class Transaction(CoinbaseScript, StandardTransactionScript, VerifyHashAndSignat
         Txid, Tx_script = CoinbaseScript.generate_coinbase_Txid(block_height, miner_address, mining_reward)
         # 解析
         tx_input = txInput(Txid, Tx_script["vins"][0]["referid"], CoinbaseScript.COINBASE_PUBLKEY, Tx_script["vins"][0]["scriptSig"])  # 签名人：超级节点
-        # tx_output = txOutput(mining_reward, Tx_script["vouts"][0]["script_pubkey_hash"])
         tx_output = txOutput(mining_reward, miner_address)
 
         # 搭建
@@ -317,16 +316,16 @@ class Transaction(CoinbaseScript, StandardTransactionScript, VerifyHashAndSignat
         Tx.Txid = Txid
         return Tx
 
-    # 签署并验证
+    # 签署并签证
     def get_signature_message(self):
-        """确保与签名时的序列化方式完全一致"""
+        """获取tx的哈希信息，用于验证签名"""
         tx_data = {
             "version": 1,
             "locktime": self.nlockTime,
             "vins": [{
                 "txid": vin.txid,
                 "referid": vin.referid,
-                "scriptSig": vin.signature.hex() if isinstance(vin.signature, bytes) else vin.signature,
+                "scriptSig": "",  # vin.signature.hex() if isinstance(vin.signature, bytes) else vin.signature,
                 "sequence": 0xFFFFFFFF
             } for vin in self.vins],
             "vouts": [{
@@ -338,24 +337,19 @@ class Transaction(CoinbaseScript, StandardTransactionScript, VerifyHashAndSignat
         return hashlib.sha256(hashlib.sha256(serialized_tx).digest()).digest()
 
     @staticmethod
-    def payer_sign(private_key: bytes, receiver_address: str, Tx_data: dict, txid: str, referid: int) -> Tuple[txInput, txOutput, bytes]:
+    def payer_sign(private_key: bytes, receiver_address: str, amount: int, Tx_data: dict, txid: str, referid: int) -> Tuple[txInput, txOutput, bytes]:
         """资金发送者签名得到signature，并且生成资金流返回"""
         # 处理错误
         if "version" not in Tx_data.keys() or "locktime" not in Tx_data.keys() or "vins" not in Tx_data.keys() or "vouts" not in Tx_data.keys():
             raise ValueError("输入的交易数据 Tx_data 格式不对！")
         elif len(Tx_data)>4:
             logging.warning("输入的交易数据 Tx_data 包含冗余键值。")
-        vins = Tx_data["vins"]
-        if referid > len(vins)-1 or referid < 0:
-            raise ValueError("引用的资金流索引溢出！")
-        elif txid != vins[referid]["txid"]:
-            raise ValueError("引用的资金流索引与ID不匹配！无法引用")
 
         # 此处无需验证，直接签名（对整个Transaction签名是合理的，因为在区块链网络上每一笔消费都是可见的）
         # 1. 序列化交易数据
         serialized_Tx = StandardTransactionScript.serialize_Tx(Tx_data)
 
-        # 2. 计算交易哈希（双重SHA256）
+        # 2. 计算交易message（哈希，双重SHA256）
         Tx_hash = hashlib.sha256(hashlib.sha256(serialized_Tx).digest()).digest()
 
         # 3. 生成SignMessageUtils类方法的签名
@@ -364,9 +358,8 @@ class Transaction(CoinbaseScript, StandardTransactionScript, VerifyHashAndSignat
         tx_input = txInput(
             txid=txid, referid=referid, pubkey=VerifyHashAndSignatureUtils.private_key_to_public_key(private_key), signature=Sig.hex()
         )
-        vouts = Tx_data["vouts"]
         tx_output = txOutput(
-            value=vouts[referid]["value"], pubkey_hash=receiver_address
+            value=amount, pubkey_hash=receiver_address
         )
         return tx_input, tx_output, Sig
 
