@@ -7,6 +7,7 @@
 __author__ = 'YJK developer'
 __date__ = '2025-04'
 
+import copy
 import time
 import json
 import logging
@@ -57,10 +58,9 @@ class BlockchainClient:
             if not if_load_from_db:
                 print("清空LevelDB数据库...")
                 self.network.clear_leveldb()
-            else:
-                self.network.blockchain.load_chaindata_from_db()  # 这里blockchain要从LevelDB中重载数据
-                all_blocks = self.network.blockchain.db.get_all_blocks()
-                self.network.mempool.rebuild_utxo_from_all_blocks(all_blocks)  # 重构所有utxo(必要)
+            self.network.blockchain.load_chaindata_from_db()  # 这里blockchain要从LevelDB中重载数据
+            all_blocks = self.network.blockchain.db.get_all_blocks()
+            self.network.mempool.rebuild_utxo_from_all_blocks(all_blocks)  # 重构所有utxo(必要)
             # 询问是否清除Redis中的节点邻居数据
             if_clear_neighbor = input("\033[37;44m是否清空redis数据库中余留的本节点邻居数据？(y/n):\033[0m\n\033[93m").strip().lower() == 'y'  # 白字蓝底，转黄字
             print("\033[0m", end="")  # 转白字
@@ -140,6 +140,7 @@ class BlockchainClient:
                 _index += 1
                 print(f"\033[96m>>> Block: {_index} Block Hash: {block_hash[:16]}...\033[0m")
                 print(block_data)
+            print("打印完毕")
         except Exception as e:
             # 输出红色文本
             print(f"\033[91m从LevelDB获取数据失败: {str(e)}\033[0m")
@@ -164,6 +165,7 @@ class BlockchainClient:
             for txid, tx in self.network.mempool.transactions.items():
                 print(f"\033[96m>>> Transaction ID: {txid[:16]}...\033[0m")
                 print(tx.serialize())
+            print("打印完毕")
         except Exception as e:
             # 输出红色文本
             print(f"\033[91m获取mempool详细信息失败: {str(e)}\033[0m")
@@ -174,13 +176,13 @@ class BlockchainClient:
         if not hasattr(self.network.mempool, 'redis'):
             print("\033[91mRedis连接不可用\033[0m")  # 输出红色文本
             return
-
         try:
             tx_list = self.network.mempool.redis.get_list("transactions")
             for tx_data in tx_list:
                 tx = json.loads(tx_data)
                 print(f"\033[96m>>> Transaction ID: {tx['Txid'][:16]}...\033[0m")
                 print(tx)
+            print("打印完毕")
         except Exception as e:
             # 输出红色文本
             print(f"\033[91m从Redis获取mempool数据失败: {str(e)}\033[0m")  # 输出青色文本
@@ -263,6 +265,76 @@ class BlockchainClient:
             # 输出红色文本
             print(f"\033[91m凭私钥登录钱包失败: {str(e)}\033[0m")
 
+    def build_transfer_tx(self, utxos, amount: int, fee: int, recipient: str, address: str, privkey: bytes, nlockTime: int, output_info=False):
+        """构造交易"""
+        from transactions import Transaction
+        inputs = []
+        outputs = []
+        _tot_amt = 0
+        for txid, vout_idx, amt in utxos:
+            if _tot_amt + amt <= amount+fee:
+                inputs.append({
+                    "txid": txid,
+                    "referid": vout_idx,
+                    "scriptSig": "",  # 即签名时填充 locking_script
+                    "sequence": 0xFFFFFFFF
+                })
+                outputs.append({
+                    "value": amt,
+                    "script_pubkey_hash": recipient
+                })
+            else:
+                for _ in range(2):
+                    inputs.append({
+                        "txid": txid,
+                        "referid": vout_idx,
+                        "scriptSig": "",  # 即签名时填充 locking_script
+                        "sequence": 0xFFFFFFFF
+                    })
+                outputs.append({
+                    "value": amount + - _tot_amt,
+                    "script_pubkey_hash": recipient
+                })
+                outputs.append({
+                    "value": _tot_amt + amt - amount - fee,
+                    "script_pubkey_hash": address
+                })
+            _tot_amt += amt  # 累加
+
+        tx_data = {
+            "version": 1,
+            "locktime": 0,
+            "vins": inputs,
+            "vouts": outputs
+        }
+        vins = []
+        vouts = []
+        tx_data_copy = copy.deepcopy(tx_data)  # 一定要深拷贝
+        for idx in range(len(tx_data["vins"])):
+            # 重新一遍循环，对每笔交易进行签名（对vin进行签名）
+            txid = tx_data["vins"][idx]["txid"]
+            referid = tx_data["vins"][idx]["referid"]
+            value = tx_data["vouts"][idx]["value"]
+            receiver_addr = tx_data["vouts"][idx]["script_pubkey_hash"]
+
+            tx_input, tx_output, signature = Transaction.payer_sign(
+                private_key=privkey,
+                receiver_address=receiver_addr,
+                amount=value,
+                Tx_data=tx_data,
+                txid=txid,
+                referid=referid
+            )
+            tx_data_copy["vins"][idx]["scriptSig"] = signature.hex() if isinstance(signature, bytes) else signature
+            vins.append(tx_input)
+            vouts.append(tx_output)
+            last_sig = signature.hex() if isinstance(signature, bytes) else signature
+        if output_info:
+            print(f"创建交易: \033[93m{tx_data_copy}\033[0m")  # 输出黄色文本
+        tmp= Transaction.create_normal_tx(vins, vouts, nlockTime=nlockTime)
+        tmp.update_fee(fee)
+        return tmp
+
     def call_transfer(self, privkey_hex, recipient, amount, fee_rate):
         """端到端转账"""
         from math_util import GenerateKeysUtils
@@ -287,146 +359,26 @@ class BlockchainClient:
             print(f"\033[93m账户-{address} （不计fee费用）可用UTXO不足。转账中止\033[0m")  # 输出黄色文本
             return
 
-        # 2. 模拟构造交易输入：获取fee信息
-        from transactions import txInput, txOutput, Transaction
-        inputs = []
-        _tot_amt = 0
-        for txid, vout_idx, amt in utxos:
-            # 构造近似交易数据
-            tx_data = {
-                "version": 1,
-                "locktime": 0,
-                "vins": [{
-                    "txid": txid,
-                    "referid": vout_idx,
-                    "scriptSig": "",  # 即签名时填充 locking_script
-                    "sequence": 0xFFFFFFFF
-                }] if _tot_amt+amt <= amount else [{
-                    "txid": txid,
-                    "referid": vout_idx,
-                    "scriptSig": "",  # 即签名时填充 locking_script
-                    "sequence": 0xFFFFFFFF
-                }, {
-                    "txid": txid,
-                    "referid": vout_idx,
-                    "scriptSig": "",  # 即签名时填充 locking_script
-                    "sequence": 0xFFFFFFFF
-                }],
-                "vouts": [{
-                    "value": amt,
-                    "script_pubkey_hash": recipient
-                }] if _tot_amt+amt <= amount else [{
-                    "value": amount - _tot_amt,
-                    "script_pubkey_hash": recipient
-                }, {
-                    "value": _tot_amt+amt - amount,  # 近似返回费用
-                    "script_pubkey_hash": address
-                }]
-            }
-            _tot_amt += amt
-
-            # 签名交易（对vin进行签名）
-            tx_input, tx_output, signature = Transaction.payer_sign(
-                private_key=privkey,
-                receiver_address=recipient,
-                Tx_data=tx_data,
-                txid=txid,
-                referid=vout_idx
-            )
-
-            inputs.append(txInput(
-                txid=txid,
-                referid=vout_idx,
-                pubkey=pubkey,
-                signature=signature.hex()
-            ))
-
-        outputs = [
-            txOutput(amount, recipient),
-            txOutput(total-amount, address)  # 近似返回费用
-        ]
-        mode_tx = Transaction.create_normal_tx(inputs, outputs, nlockTime=0)
+        # 2. 模拟构造交易：获取fee大小
+        mode_tx = self.build_transfer_tx(utxos=utxos, amount=amount, fee=0, recipient=recipient, address=address, privkey=privkey, nlockTime=0, output_info=False)  # 构造近似交易数据 fee = 0
         mode_tx.update_feerate(fee_rate=fee_rate)  # 创建近似交易用来计算fee
         fee = mode_tx.fee
-        if total > amount + fee:
-            outputs.append(txOutput(total-amount-fee, address))  # 添加找零输出（如果有）
-        elif total < amount + fee:
+        if total < amount + fee:
             print(f"\033[93m账户-{address} 手续费不足。转账终止\033[0m")  # 输出黄色文本
             return
-
         del mode_tx  # 删除近似交易
-        del inputs
-        del outputs
 
-        # 3. 创建准确交易
-        inputs = []
-        _tot_amt = 0
-        for txid, vout_idx, amt in utxos:
-            tx_data = {
-                "version": 1,
-                "locktime": 0,
-                "vins": [{
-                    "txid": txid,
-                    "referid": vout_idx,
-                    "scriptSig": "",  # 即签名时填充 locking_script
-                    "sequence": 0xFFFFFFFF
-                }] if _tot_amt + amt <= amount + fee else [{
-                    "txid": txid,
-                    "referid": vout_idx,
-                    "scriptSig": "",  # 即签名时填充 locking_script
-                    "sequence": 0xFFFFFFFF
-                }, {
-                    "txid": txid,
-                    "referid": vout_idx,
-                    "scriptSig": "",  # 即签名时填充 locking_script
-                    "sequence": 0xFFFFFFFF
-                }],
-                "vouts": [{
-                    "value": amt,
-                    "script_pubkey_hash": recipient
-                }] if _tot_amt + amt <= amount + fee else [{
-                    "value": amount - _tot_amt,
-                    "script_pubkey_hash": recipient
-                }, {
-                    "value": _tot_amt + amt -(amount+fee),  # 准确回返费用
-                    "script_pubkey_hash": address
-                }]
-            }
-            _tot_amt += amt
+        # 3. 创建准确交易：包含准确fee信息
+        tx = self.build_transfer_tx(utxos=utxos, amount=amount, fee=fee, recipient=recipient, address=address, privkey=privkey, nlockTime=0, output_info=True)  # 创建完整的transaction
 
-            # 签名交易（对vin进行签名）
-            tx_input, tx_output, signature = Transaction.payer_sign(
-                private_key=privkey,
-                receiver_address=recipient,
-                Tx_data=tx_data,
-                txid=txid,
-                referid=vout_idx
-            )
-
-            inputs.append(txInput(
-                txid=txid,
-                referid=vout_idx,
-                pubkey=pubkey,
-                signature=signature.hex()
-            ))
-
-        outputs = [
-            txOutput(amount, recipient),
-            txOutput(total - amount - fee, address)  # 准确返回费用
-        ]
-        tx = Transaction.create_normal_tx(inputs, outputs, nlockTime=0)  # 创建完整的transaction
-        tx.update_fee(fee=fee)
-
-        # 5. 添加到内存池并广播
+        # 4. 添加到内存池并广播
         if self.network.mempool.add_transaction(tx):
             self.network.broadcast_tx(tx)
-            print(f"转账成功，交易ID: {tx.Txid}")
+            print(f"创建交易成功，交易ID: {tx.Txid}")
             print(f"发送方: {address}")
             print(f"接收方: {recipient}")
             print(f"金额: {amount} YJK_satoshis")
-            print(f"手续费: {fee_rate} YJK_satoshis")
-            if total > amount:
-                print(f"找零: {total - amount - fee_rate} YJK_satoshis")
+            print(f"手续费: {fee} YJK_satoshis")
 
     def __del__(self):
         """清理资源"""
