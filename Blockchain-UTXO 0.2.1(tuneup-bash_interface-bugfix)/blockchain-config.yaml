@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blockchain-config
+data:
+  config.yaml: |
+    p2p_port: 5000
+    api_port: 5001
+    initial_peers: "blockchain-node-0.blockchain-service.default.svc.cluster.local:5000"
