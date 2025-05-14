@@ -26,6 +26,7 @@ from typing import List
 from threading import Lock
 
 from transactions import Transaction
+from transaction_script import CoinbaseScript
 from math_util import VerifyHashAndSignatureUtils
 from blockchain import Block
 from db_module import MongoDBModule
@@ -48,7 +49,7 @@ class UTXOManager:
         self.utxos = {}  # {txid: {vout_index: (amount, address)}}
         self.spent_outputs = set()  # {(txid, vout_index)}
         self.db = MongoDBModule(db_name="utxo_db_port_"+str(p2p_port))
-        self._load_utxos()  # 使用MongoDB存储UTXO
+        # self._load_utxos()  # 使用MongoDB存储UTXO，但初始化不应该加载 --fix bug
 
     def _load_utxos(self):
         """从MongoDB加载UTXO"""
@@ -80,16 +81,12 @@ class UTXOManager:
                 time.sleep(1)
 
     # 因为区块链是不允许修改的，所以不能这么写del_utxo。UTXO实际上不会删除使用过的交易；而是通过标记输入为已花费。除非重新加载区块链
-    # def del_utxo(self, txid: str, vout_index: int):
-    #     if txid not in self.utxos:
-    #         raise ValueError("UTXO当中没有这个交易ID！")
-    #     del self.utxos[txid][vout_index]
 
     def mark_spent(self, txid: str, vout_index: int):
         """标记使用过的UTXO"""
-        self.spent_outputs.add((txid, vout_index))
-        # 更新MongoDB
-        self.db.mark_as_spent(txid, vout_index)
+        with self.lock:
+            self.spent_outputs.add((txid, vout_index))
+            self.db.mark_as_spent(txid, vout_index)  # 更新MongoDB
 
     def is_spent(self, txid: str, vout_index: int) -> bool:
         """判断是否使用过"""
@@ -212,22 +209,20 @@ class Mempool:
 
     def _validate_transaction(self, tx: Transaction) -> bool:
         """完整交易验证流程"""
-        print("\n--- 交易验证详细信息 ---")
-        print(f"交易ID: {tx.Txid}")
-        print("输入详情:")
-        for i, vin in enumerate(tx.vins):
-            print(f"输入{i}:")
-            print(f"  txid: {vin.txid}")
-            print(f"  referid: {vin.referid}")
-            print(f"  pubkey: {vin.pubkey.hex() if isinstance(vin.pubkey, bytes) else vin.pubkey}")
-            print(f"  signature: {vin.signature.hex() if isinstance(vin.signature, bytes) else vin.signature}")
+        # print("\n--- 交易验证详细信息 ---")
+        # print(f"交易ID: {tx.Txid}")
+        # print("输入详情:")
+        # for i, vin in enumerate(tx.vins):
+        #     print(f"输入{i}:")
+        #     print(f"  txid: {vin.txid}")
+        #     print(f"  referid: {vin.referid}")
+        #     print(f"  pubkey: {vin.pubkey.hex() if isinstance(vin.pubkey, bytes) else vin.pubkey}")
+        #     print(f"  signature: {vin.signature.hex() if isinstance(vin.signature, bytes) else vin.signature}")
         # 1. 验证输入有效性
         total_input = 0
+        is_coinbase = CoinbaseScript.is_coinbase(tx.generate_self_script())
         for vin in tx.vins:
-            print("vin: ",vin.serialize())
             # 检查UTXO是否存在且未花费
-            is_coinbase = tx.is_coinbase(tx.generate_self_script())
-            print(is_coinbase)
             if self.utxo_monitor.is_spent(vin.txid, vin.referid):
                 logging.warning(f"双花检测: {vin.txid}:{vin.referid}")
                 return False
@@ -243,8 +238,7 @@ class Mempool:
             if not utxo:
                 logging.warning(f"未引用正确的tx在tx_input中: {vin.txid}:{vin.referid}")
                 return False
-
-            message = tx.get_signature_message()
+            message = tx.get_signature_message()  # hashlib.sha256(hashlib.sha256(serialized_tx).digest()).digest()
             public_key = bytes.fromhex(vin.pubkey) if isinstance(vin.pubkey, str) else vin.pubkey
             signature = bytes.fromhex(vin.signature) if isinstance(vin.signature, str) else vin.signature
 
@@ -256,8 +250,7 @@ class Mempool:
                 print("验证失败详细信息:")
                 print("Public Key:", public_key.hex())
                 print("Signature:", signature.hex())
-                print("Message:", message.hex())
-                logging.warning("签名验证失败")
+                print("交易message:", message.hex())
                 return False
             total_input += utxo[0]
 
@@ -334,10 +327,39 @@ class Mempool:
                 block = Block.deserialize(block_data)
                 self.update_utxo(block.txs_data)
 
-    def reload_mempool_from_DB(self):
-        """从数据库恢复类的所有数据"""
-        pass
-        # TODO: 从内存数据库中恢复数据
+    def bulk_del_transactions(self, del_txs: List[Transaction]):
+        """移除处理过的tx"""
+        for tx in del_txs:
+            if tx.Txid in self.transactions.keys():
+                del self.transactions[tx.Txid]
+        self.remove_transactions_from_DB()
+
+    def remove_transactions_from_DB(self):
+        """从数据库移除处理过的tx"""
+        try:
+            # 获取当前内存中的所有交易ID
+            current_txids = set(self.transactions.keys())
+
+            # 从Redis获取所有存储的交易
+            stored_txs = self.redis.get_list("transactions")
+
+            # 筛选出需要保留的交易（即当前内存中存在的交易）
+            txs_to_keep = []
+            for tx_data in stored_txs:
+                tx = Transaction.deserialize(json.loads(tx_data))
+                if tx.Txid in current_txids:
+                    txs_to_keep.append(tx_data)
+
+            # 先删除旧的交易列表
+            self.redis.del_all_hash("transactions")
+
+            # 如果还有需要保留的交易，重新写入
+            if txs_to_keep:
+                self.redis.push_list("transactions", *txs_to_keep)
+
+        except Exception as e:
+            logging.error(f"从数据库移除交易失败: {str(e)}")
+            raise
 
     def __repr__(self):
         return f"Mempool(交易数={len(self.transactions)}, " \
