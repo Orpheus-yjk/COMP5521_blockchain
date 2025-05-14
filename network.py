@@ -64,10 +64,13 @@ from blockchain import Block, Blockchain
 from mining import MiningModule
 from db_module import RedisModule
 
+__all__ = ['NetworkInterface']
+
 # PORT 端口
 P2P_PORT = 5000
 API_PORT = 5001
-SYNC_INTERVAL = 20
+DEFAULT_SYNC_INTERVAL = 120  # 系统默认两分钟同步一次
+DEFUALT_RECOVERY_INTERVAL = 60  # 系统默认crush恢复时间等待
 
 
 class NetworkInterface:
@@ -80,10 +83,11 @@ class NetworkInterface:
         app (Flask): P2P服务端应用实例
     """
 
-    def __init__(self, p2p_port: int, api_port: int, blockchain: Blockchain, mempool: Mempool):
+    def __init__(self, p2p_port: int, api_port: int, blockchain: Blockchain, mempool: Mempool, default_sync_time):
         try:
             self.p2p_port = int(p2p_port)
             self.api_port = int(api_port)
+            self._system_default_synchronized_time = default_sync_time if default_sync_time else DEFAULT_SYNC_INTERVAL
             if not (1024 <= self.p2p_port <= 65535) or not (1024 <= self.api_port <= 65535):
                 raise ValueError("Port must be between 1024 and 65535")
 
@@ -453,13 +457,13 @@ class NetworkInterface:
                 self._sync_p2p_neighbor()
                 elapsed = int(time.time() - start_time)
 
-                # 动态调整sleep时间，确保总间隔接近SYNC_INTERVAL
-                sleep_time = max(0, SYNC_INTERVAL - elapsed)
+                # 动态调整sleep时间，确保总间隔接近~self._system_default_synchronized_time
+                sleep_time = max(0, self._system_default_synchronized_time - elapsed)
                 time.sleep(sleep_time)
 
             except Exception as e:
                 logging.error(f"Sync loop error: {str(e)}", exc_info=True)
-                time.sleep(min(45, SYNC_INTERVAL * 2))  # 错误时短暂等待
+                time.sleep(min(DEFUALT_RECOVERY_INTERVAL, self._system_default_synchronized_time * 2))  # 错误时短暂等待
 
     def _start_sync_daemon(self):
         """启动sync_loop守护进程"""
@@ -828,7 +832,7 @@ if __name__ == "__main__":
     print("NETWORK.PY start")
     blockchain = Blockchain(5000)
     mempool = Mempool()
-    network = NetworkInterface(5000, 5001, blockchain, mempool)
+    network = NetworkInterface(5000, 5001, blockchain, mempool, None)
     miner = MiningModule()
 
     # 添加初始节点
