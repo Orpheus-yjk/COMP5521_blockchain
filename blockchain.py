@@ -306,7 +306,9 @@ class Blockchain:
                 if all_blocks:
                     self.blockchain = [Block.deserialize(block_data) for block_data in all_blocks.values()]
             except:
-                pass
+                print(f"\033[91m从LevelDB加载区块链数据失败\033[0m")  # 输出红色文本
+        else:
+            print(f"\033[91m从LevelDB加载区块链数据失败\033[0m")  # 输出红色文本
 
     def serialize(self):
         """序列化整个区块链"""
