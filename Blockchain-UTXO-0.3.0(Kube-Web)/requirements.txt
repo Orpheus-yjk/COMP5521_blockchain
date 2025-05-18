@@ -1,0 +1,25 @@
+# 核心依赖
+ecdsa>=0.18.0
+base58>=2.1.1
+pycryptodome>=3.19.0
+pywin32>=306  # Windows系统相关功能（如pyautogui依赖）
+kubernetes>=28.1.0  # 新增的Kubernetes客户端库
+
+# 数据库相关
+plyvel>=1.5.0
+redis>=4.5.5
+pymongo>=4.5.0
+
+# 网络与API
+flask>=3.0.0
+requests>=2.31.0
+
+# 辅助工具
+pyautogui>=0.9.54  # 可选（仅当需要GUI自动化时安装）
+loguru>=0.7.2  # 增强日志功能（代码中虽使用logging但推荐替换）
+tqdm>=4.66.1  # 进度条工具（可用于挖矿过程可视化）
+
+# 开发工具（可选）
+ipython>=8.18.1
+black>=23.11.0
+pytest>=7.4.3
