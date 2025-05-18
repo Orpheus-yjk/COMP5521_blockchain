@@ -38,7 +38,8 @@ class BlockchainClient:
             self.miner = MiningModule()
 
             # 询问是否重设网络区块链同步时间间隔
-            if_reset_default_sync_time = input("\033[37;44m是否是否重设网络区块链同步时间间隔？(y/n): \033[0m\n\033[93m").strip().lower() == 'y'  # 白字蓝底，转黄字
+            if_reset_default_sync_time = \
+                input("\033[37;44m是否是否重设网络区块链同步时间间隔？(y/n): \033[0m\n\033[93m").strip().lower() == 'y'  # 白字蓝底，转黄字
             print("\033[0m", end="")  # 转白字
             _t = int(input("请输入重设的网络区块链同步时间间隔（整数，秒）>>>\n")) if if_reset_default_sync_time else None
             # 初始化网络接口，启动网络服务进程，清理邻居。同步区块链和内存池数据到网络端（后续也需要定期同步）
@@ -53,7 +54,8 @@ class BlockchainClient:
             self.network.verify_db_connections()
             self.network.reset_mongodb()
             # 询问blockchain是否从LevelDB加载数据
-            if_load_from_db = input("\033[37;44m是否从LevelDB加载区块链数据？(y/n): \033[0m\n\033[93m").strip().lower() == 'y'  # 白字蓝底，转黄字
+            if_load_from_db = \
+                input("\033[37;44m是否从LevelDB加载区块链数据？(y/n): \033[0m\n\033[93m").strip().lower() == 'y'  # 白字蓝底，转黄字
             print("\033[0m", end="")  # 转白字
             if not if_load_from_db:
                 print("清空LevelDB数据库...")
@@ -62,7 +64,8 @@ class BlockchainClient:
             all_blocks = self.network.blockchain.db.get_all_blocks()
             self.network.mempool.rebuild_utxo_from_all_blocks(all_blocks)  # 重构所有utxo(必要)
             # 询问是否清除Redis中的节点邻居数据
-            if_clear_neighbor = input("\033[37;44m是否清空redis数据库中余留的本节点邻居数据？(y/n):\033[0m\n\033[93m").strip().lower() == 'y'  # 白字蓝底，转黄字
+            if_clear_neighbor = input("\033[37;44m是否清空redis数据库中余留的本节点邻居数据？(y/n):"
+                                      "\033[0m\n\033[93m").strip().lower() == 'y'  # 白字蓝底，转黄字
             print("\033[0m", end="")  # 转白字
             if if_clear_neighbor:
                 print("清空redis数据库中余留的本节点邻居数据...")
@@ -77,6 +80,11 @@ class BlockchainClient:
         """添加邻居节点"""
         self.network.add_neighbor(address)
         print(f"已添加邻居节点: {address}")
+
+    def del_peer(self, address):
+        """删除邻居节点"""
+        self.network.remove_neighbor(address, False)
+        print(f"已删除邻居节点: {address}")
 
     def mine_block(self, miner_address):
         """挖矿"""
@@ -96,7 +104,8 @@ class BlockchainClient:
             print("\033[93m挖矿失败，区块验证未通过\033[0m")  # 输出黄色文本
 
     def sync_blocks(self):
-        self.network._sync_blockchain()
+        """手动从邻居同步整条区块链数据"""
+        self.network.sync_blockchain()
 
     def print_blockchain_info(self):
         """打印区块链简要信息"""
@@ -149,11 +158,7 @@ class BlockchainClient:
         """打印本地mempool的简要信息"""
         print("\n>>> 当前本地mempool状态:")
         try:
-            tx_count = len(self.network.mempool.transactions)
-            mempool_size = sum(tx.calculate_raw_size() for tx in self.network.mempool.transactions.values())
-            print(f"交易数量: {tx_count}")
-            print(f"内存占用: {mempool_size} bytes")
-            print(f"最大容量: {self.network.mempool.max_size} bytes")
+            print(self.network.mempool)
         except Exception as e:
             # 输出红色文本
             print(f"\033[91m获取mempool信息失败: {str(e)}\033[0m")
@@ -265,7 +270,9 @@ class BlockchainClient:
             # 输出红色文本
             print(f"\033[91m凭私钥登录钱包失败: {str(e)}\033[0m")
 
-    def build_transfer_tx(self, utxos, amount: int, fee: int, recipient: str, address: str, privkey: bytes, nlockTime: int, output_info=False):
+    @staticmethod
+    def build_transfer_tx(utxos, amount: int, fee: int, recipient: str, address: str, privkey: bytes, nlockTime: int,
+                          output_info=False):
         """构造交易"""
         from transactions import Transaction
         inputs = []
@@ -328,10 +335,9 @@ class BlockchainClient:
             tx_data_copy["vins"][idx]["scriptSig"] = signature.hex() if isinstance(signature, bytes) else signature
             vins.append(tx_input)
             vouts.append(tx_output)
-            last_sig = signature.hex() if isinstance(signature, bytes) else signature
         if output_info:
             print(f"创建交易: \033[93m{tx_data_copy}\033[0m")  # 输出黄色文本
-        tmp= Transaction.create_normal_tx(vins, vouts, nlockTime=nlockTime)
+        tmp = Transaction.create_normal_tx(vins, vouts, nlockTime=nlockTime)
         tmp.update_fee(fee)
         return tmp
 
@@ -360,7 +366,9 @@ class BlockchainClient:
             return
 
         # 2. 模拟构造交易：获取fee大小
-        mode_tx = self.build_transfer_tx(utxos=utxos, amount=amount, fee=0, recipient=recipient, address=address, privkey=privkey, nlockTime=0, output_info=False)  # 构造近似交易数据 fee = 0
+        mode_tx = self.build_transfer_tx(
+            utxos=utxos, amount=amount, fee=0, recipient=recipient,
+            address=address, privkey=privkey, nlockTime=0, output_info=False)  # 构造近似交易数据 fee = 0
         mode_tx.update_feerate(fee_rate=fee_rate)  # 创建近似交易用来计算fee
         fee = mode_tx.fee
         if total < amount + fee:
@@ -369,7 +377,8 @@ class BlockchainClient:
         del mode_tx  # 删除近似交易
 
         # 3. 创建准确交易：包含准确fee信息
-        tx = self.build_transfer_tx(utxos=utxos, amount=amount, fee=fee, recipient=recipient, address=address, privkey=privkey, nlockTime=0, output_info=True)  # 创建完整的transaction
+        tx = self.build_transfer_tx(utxos=utxos, amount=amount, fee=fee, recipient=recipient, address=address,
+                                    privkey=privkey, nlockTime=0, output_info=True)  # 创建完整的transaction
 
         # 4. 添加到内存池并广播
         if self.network.mempool.add_transaction(tx):
@@ -384,7 +393,110 @@ class BlockchainClient:
         """清理资源"""
         self.network.cleanup_resources()
 
+
+    # ----------------- 节点管理功能 (client_bash.py) -----------------
+    # 扩展 delete_node 方法
+    def delete_node(self, node_id: str) -> bool:
+        """
+        删除Kubernetes中的区块链节点
+        Args:
+            node_id: 节点ID或Pod名称
+        Returns:
+            bool: 是否成功删除
+        """
+        from kubernetes import client as k8s_client, config
+        from kubernetes.client.exceptions import ApiException
+        try:
+
+            # 加载Kubernetes配置
+            config.load_kube_config()
+            core_api = k8s_client.CoreV1Api()
+
+            # 获取Pod详情
+            pod_name = f"blockchain-node-{node_id}" if node_id.isdigit() else node_id
+            pod = core_api.read_namespaced_pod(
+                name=pod_name,
+                namespace="default"
+            )
+
+            # 删除关联Service
+            try:
+                core_api.delete_namespaced_service(
+                    name=f"svc-{pod.metadata.name}",
+                    namespace="default"
+                )
+            except ApiException as e:
+                if e.status != 404:  # 忽略Service不存在的错误
+                    raise
+
+            # 删除PVC（如果存在）
+            if pod.spec.volumes:
+                for vol in pod.spec.volumes:
+                    if vol.persistent_volume_claim:
+                        try:
+                            core_api.delete_namespaced_persistent_volume_claim(
+                                name=vol.persistent_volume_claim.claim_name,
+                                namespace="default"
+                            )
+                        except ApiException as e:
+                            if e.status != 404:  # 忽略PVC不存在的错误
+                                raise
+
+            # 删除Pod
+            core_api.delete_namespaced_pod(
+                name=pod.metadata.name,
+                namespace="default"
+            )
+
+            # 更新拓扑
+            self._update_topology()
+            return True
+
+        except ApiException as e:
+            logging.error(f"Kubernetes API错误: {e.reason}")
+            return False
+        except Exception as e:
+            logging.error(f"删除节点失败: {str(e)}")
+            return False
+
+    # 同时需要添加_is_node_active方法
+    def _is_node_active(self, ip: str) -> bool:
+        """检查节点是否活跃"""
+        try:
+            import requests
+            response = requests.get(f"http://{ip}:5001/api/status", timeout=3)
+            return response.status_code == 200
+        except:
+            return False
+
+    def _update_topology(self):
+        """更新节点拓扑信息"""
+        self.network.P2P_neighbor = {
+            addr: meta for addr, meta in self.network.P2P_neighbor.items()
+            if self._is_node_active(addr.split(':')[0])  # 检查IP是否存活
+        }
+        self.network._save_network_state()
+
+
+def test_peer_removal():
+    # 初始化网络
+    net = NetworkInterface(5000, 5001, Blockchain(5000), Mempool(5000), None)
+    net.add_neighbor("192.168.1.2:5000")
+
+    # 测试单向删除
+    assert net.remove_neighbor("192.168.1.2:5000") is True
+    assert "192.168.1.2:5000" not in net.P2P_neighbor
+
+    # 测试双向删除
+    net.add_neighbor("192.168.1.3:5000")
+    from unittest.mock import patch
+    with patch('requests.post') as mock_post:
+        mock_post.return_value.status_code = 200
+        assert net.remove_neighbor("192.168.1.3:5000", bidirectional=True) is True
+        mock_post.assert_called_once()
+
 def main():
+    """bash client主程序"""
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='区块链客户端')
     parser.add_argument('--port', type=int, default=DEFAULT_P2P_PORT, help='P2P端口')
@@ -401,10 +513,12 @@ def main():
 
     # 命令行交互
     while True:
-        cmd = input("\n请输入命令 (view/addpeer/mine/continuous_mine/transfer/sync/exit/standby) >>>\033[0m\n").strip().lower()  # 白字蓝底
+        cmd = input("\n请输入命令 (view/addpeer/mine/continuous_mine/transfer/sync/delpeer/delnode/exit/standby) >>>"
+                    "\033[0m\n").strip().lower()  # 白字蓝底
         if cmd == "view":
-            order = input("请选择查看的信息 (\033[93mhelp/blockchain_info/blockchain_details/blockchain_LevelDB/mempool_info/"
-                          "mempool_details/mempool_Redis/neighbor/neighbor_Redis/wallet/utxo_MongoDB\033[0m) >>>\n")  # 输出中间内容黄色文本，转黄字
+            order = input("请选择查看的信息 (\033[93mhelp/blockchain_info/blockchain_details/blockchain_LevelDB/"
+                          "mempool_info/mempool_details/mempool_Redis/neighbor/neighbor_Redis/wallet/"
+                          "utxo_MongoDB\033[0m) >>>\n")  # 输出中间内容黄色文本，转黄字
             if order == "help":
                 print("\033[96mView~命令提示\033[0m")  # 输出青色文本
                 print(">>> blockchain_info : 打印区块链简要信息")
@@ -448,7 +562,7 @@ def main():
             client.print_blockchain_info()
 
         elif cmd == "continuous_mine":
-            block_num= int(input("\033[37;44m请输入挖矿个数 >>>\033[0m\n"),0)  # 白字蓝底
+            block_num = int(input("\033[37;44m请输入挖矿个数 >>>\033[0m\n"), 0)  # 白字蓝底
             address = "18QJhgS3DkPJGiSaFkNZMoe9Nsq1bv4eHH"  # 任意地址1
             # address = "18n3kQHq2nUf1LkJwpo3ZzK5kQqnY4LGey"  # 任意地址2
             for i in range(block_num):
@@ -478,10 +592,19 @@ def main():
             client.sync_blocks()
             client.print_blockchain_info()
 
+        elif cmd == "delpeer":
+            client.print_neighbor()
+            peer = input("\033[37;44m请输入删除的邻居节点地址 (IP:PORT) >>>\033[0m\n")  # 白字蓝底
+            client.del_peer(peer)
+
+        elif cmd == "delnode":
+            node_id = input("\033[37;44m请输入删除的邻居节点编号 >>>\033[0m\n")  # 白字蓝底
+            client.delete_node(node_id)  # FIXME: kbernetes~
+
         elif cmd == "standby":
             while True:
                 print("Standby node...")
-                time.sleep(3600)
+                time.sleep(1800)
                 pass  # 进入standby模式，只显示输出不操作
 
         elif cmd == 'exit':
@@ -490,6 +613,18 @@ def main():
 
         else:
             print("\033[93m无效命令，可用命令: view/addpeer/mine/continuous_mine/transfer/sync/exit/standby \033[0m")  # 输出黄色文本
+
+
+# client_bash.py 新增SPVClient子类
+class SPVClient(BlockchainClient):
+    def __init__(self, p2p_port, api_port):
+        super().__init__(p2p_port, api_port)
+        self.block_headers = []  # 仅存储区块头
+
+    def validate_block_header(self, header):
+        # 简化验证逻辑（检查PoW难度）
+        return header.calculate_blockheader_hash().startswith('0' * self.network.difficulty)
+
 
 if __name__ == "__main__":
     main()
