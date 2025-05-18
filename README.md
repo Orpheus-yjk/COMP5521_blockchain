@@ -51,8 +51,6 @@ Be able to write a UTXO (unspent transaction output) blockchain platform.
 
 ### 项目描述
 
-COMP5521分布式账本技术、加密货币和电子支付 期末项目介绍。
-
 深入了解区块链系统的工作原理。能够编写一个UTXO（未花费交易输出）区块链平台。
 
 区块链原型: 根据以下结构构建区块链系统。区块应包含以下基本内容。a) 索引：当前区块的高度。b) 时间戳。c) 上一个区块哈希。d) 当前区块哈希。e) 难度：区块哈希开头的位数，动态变化。f) 随机数：用于计算区块哈希的随机数。g) 交易的Merkle根。h) 数据：交易。 
@@ -87,11 +85,11 @@ COMP5521分布式账本技术、加密货币和电子支付 期末项目介绍�
 
 以下是主要的引用关系：
 
-1. blockchain 引用 transactions
-2. transactions 引用 math_util transaction_script
-3. mempool 引用 transactions math_util
-4. mining 引用 transactions blockchain
-5. network 引用 transaction_script transactions mempool blockchain mining
+1. `blockchain` 引用 `transactions`
+2. `transactions` 引用 `math_util` `transaction_script`
+3. `mempool` 引用 `transactions` `math_util`
+4. `mining` 引用 `transactions` `blockchain`
+5. `network` 引用 `transaction_script` `transactions mempool` `blockchain mining`
 
 ## 二、初始简易`client.py` 实现
 
